@@ -24,8 +24,8 @@ def init_connection():
             ]
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             client = gspread.authorize(creds)
-            # Open spreadsheet 'resultManagement'
-            sheet = client.open("resultManagement")
+            # Open spreadsheet 'ResultManager'
+            sheet = client.open("ResultManager")
             return sheet
         else:
             return None
