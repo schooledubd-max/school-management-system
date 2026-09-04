@@ -1543,7 +1543,7 @@ PAGE_FUNCS = {
 def sidebar_nav():
     role = st.session_state["role"]
     with st.sidebar:
-        st.markdown(f"### 🎓 EduManage BD")
+        st.markdown(f"### 🎓 School Manager BD")
         st.caption(f"{st.session_state['school_name']}")
         st.markdown(f"**{st.session_state['user_name']}**  \n`{role}`")
         st.markdown("---")
