@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-EduManage BD — Multi-Tenant School Management & Automated Result System
+School Manager BD — Multi-Tenant School Management & Result System
 =========================================================================
 A single-file Streamlit application that connects to a Google Sheets
 backend (the same structure as ResultManager.xlsx) and implements:
@@ -60,7 +60,7 @@ from google.oauth2.service_account import Credentials
 # APP CONFIG
 # =============================================================================
 st.set_page_config(
-    page_title="EduManage BD | School Result & Management System",
+    page_title="School Manager BD | School Result & Management System",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
