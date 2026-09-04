@@ -491,7 +491,7 @@ def do_logout():
 
 
 def login_page():
-    hero("EduManage BD", "Multi-Tenant School Management & Automated Result System")
+    hero("School Manager BD", "Multi-Tenant School Management & Result System")
     tab_school, tab_super, tab_guardian = st.tabs(
         ["🏫 School Staff Login", "🛡️ SuperAdmin", "🎒 Check Result (Student/Guardian)"]
     )
