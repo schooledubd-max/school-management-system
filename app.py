@@ -102,6 +102,7 @@ REQUIRED_EXTRA_HEADERS = {
     "Marks": ["EnteredBy", "EnteredDate"],
     "Teachers": ["Password"],
     "ExamDuties": ["ExamDate"],
+    "Students": ["Religion"],
 }
 
 # =============================================================================
@@ -109,19 +110,107 @@ REQUIRED_EXTRA_HEADERS = {
 # =============================================================================
 CUSTOM_CSS = """
 <style>
+    /* ============================================================
+       CRITICAL FIX: many Android phones (and Chrome's own "Force Dark
+       Mode for web contents" feature) auto-invert/auto-darken pages
+       that don't explicitly declare their color scheme. That is what
+       was making input boxes render "সাদা লেখা, সাদা পেজ" (white text
+       on a white/blank page) even though our own CSS said otherwise —
+       the browser was repainting OVER our colors. Declaring
+       color-scheme: light tells the browser/OS this page is
+       intentionally light, so it stops guessing and stops repainting
+       form fields. This one rule fixes the vast majority of the
+       "text is invisible" reports.
+       ============================================================ */
+    :root, html, body, .stApp { color-scheme: light !important; }
+    input, textarea, select, button {
+        color-scheme: light !important;
+        -webkit-text-fill-color: #0f172a !important;
+        caret-color: #0f172a !important;
+    }
+
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
-
-    .stApp {
-        background: linear-gradient(180deg, #f4f7fb 0%, #eef2f9 100%);
+    /* IMPORTANT: do NOT hide the whole <header>, its collapse/expand arrow
+       for the sidebar lives there — hiding/shrinking it made the sidebar
+       toggle impossible to see or tap once the sidebar was closed on
+       mobile. Give it normal height and keep it fully visible/on-top. */
+    header[data-testid="stHeader"] {
+        background: transparent !important; height: 3.2rem !important;
+        overflow: visible !important; z-index: 999997 !important;
     }
+    [data-testid="stToolbar"] { visibility: hidden !important; }
+
+    /* The sidebar open/close toggle — cover every Streamlit version's
+       testid for it, pin it on-screen, and make it big + colorful so
+       it is unmistakably tappable (fixes "swipe বন্ধ করলে আর মেনু
+       ফিরে আসে না"). */
+    [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarCollapseButton"], [data-testid="baseButton-headerNoPadding"],
+    button[kind="header"], [data-testid="stSidebarNavCollapseIcon"] {
+        visibility: visible !important; display: flex !important; opacity: 1 !important;
+        position: fixed !important; top: 10px !important; left: 10px !important;
+        background: #2563eb !important; color: #ffffff !important;
+        border-radius: 10px !important; box-shadow: 0 4px 12px rgba(0,0,0,0.25) !important;
+        z-index: 999999 !important; padding: 6px !important;
+    }
+    [data-testid="collapsedControl"] svg, [data-testid="stSidebarCollapsedControl"] svg,
+    button[kind="header"] svg { fill: #ffffff !important; color: #ffffff !important; }
+    /* Push page content down so it never sits under the fixed toggle button */
+    .block-container { padding-top: 3.2rem !important; }
+
+    /* --------------------------------------------------------------
+       Also force readable dark text everywhere by default (belt and
+       braces alongside color-scheme above); specific colored elements
+       below (hero banner, stat numbers, badges, table headers,
+       sidebar) use more specific selectors so they still win.
+       -------------------------------------------------------------- */
+    .stApp, .stApp * { color: #0f172a; }
+    .stApp { background: linear-gradient(180deg, #f4f7fb 0%, #eef2f9 100%); }
+
+    [data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label {
+        color: #0f172a !important; font-weight: 700 !important; font-size: 0.95rem !important;
+    }
+    [data-testid="stCaptionContainer"] p { color: #475569 !important; }
+    .stTextInput input, .stNumberInput input, .stTextArea textarea,
+    .stDateInput input, .stTimeInput input, input, textarea {
+        color: #0f172a !important; background: #ffffff !important; border: 1px solid #cbd5e1 !important;
+    }
+    .stSelectbox [data-baseweb="select"] > div, .stMultiSelect [data-baseweb="select"] > div {
+        color: #0f172a !important; background: #ffffff !important; border: 1px solid #cbd5e1 !important;
+    }
+    .stTabs [data-baseweb="tab"] p { color: #475569 !important; font-weight: 600 !important; }
+    .stTabs [aria-selected="true"] p { color: #2563eb !important; font-weight: 800 !important; }
+    ::placeholder { color: #94a3b8 !important; opacity: 1 !important; }
+
+    /* Dropdown / multiselect popovers render in a portal OUTSIDE .stApp,
+       so they need their own (unscoped) override or their text can be
+       invisible (white-on-white) too. */
+    div[data-baseweb="popover"], div[data-baseweb="menu"], ul[role="listbox"],
+    li[role="option"], div[data-baseweb="select"] {
+        background: #ffffff !important;
+    }
+    div[data-baseweb="popover"] *, div[data-baseweb="menu"] *, ul[role="listbox"] *,
+    li[role="option"] *, div[data-baseweb="select"] * {
+        color: #0f172a !important;
+    }
+    li[role="option"][aria-selected="true"] { background: #dbeafe !important; }
+    li[role="option"]:hover { background: #eff6ff !important; }
+
+    /* Radio / checkbox option text */
+    .stRadio label p, .stCheckbox label p, .stRadio [data-testid="stMarkdownContainer"] p {
+        color: #0f172a !important;
+    }
+    /* Streamlit dataframes / tables */
+    [data-testid="stDataFrame"], [data-testid="stDataFrame"] * { color: #0f172a !important; }
+    [data-testid="stTable"] table, [data-testid="stTable"] * { color: #0f172a !important; }
+
     .em-hero {
         background: linear-gradient(120deg, #1e3a8a 0%, #2563eb 55%, #0ea5e9 100%);
         padding: 28px 32px; border-radius: 18px; color: white;
         margin-bottom: 22px; box-shadow: 0 10px 30px rgba(30,58,138,0.25);
     }
-    .em-hero h1 { margin: 0; font-size: 1.7rem; font-weight: 800; }
+    .em-hero h1, .em-hero * { margin: 0; font-size: 1.7rem; font-weight: 800; color: white !important; }
     .em-hero p { margin: 4px 0 0 0; opacity: 0.92; font-size: 0.95rem; }
 
     .em-card {
@@ -129,42 +218,61 @@ CUSTOM_CSS = """
         box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
         border: 1px solid rgba(15,23,42,0.05); margin-bottom: 16px;
     }
+    .em-hint {
+        background: #eff6ff; border-left: 4px solid #2563eb; border-radius: 8px;
+        padding: 8px 12px; font-size: 0.85rem; color: #1e3a8a !important; margin: 4px 0 14px 0;
+    }
+    .em-hint * { color: #1e3a8a !important; }
     .em-stat {
         background: white; border-radius: 14px; padding: 16px 18px;
         border-left: 5px solid #2563eb; box-shadow: 0 4px 14px rgba(15,23,42,0.05);
     }
-    .em-stat .val { font-size: 1.6rem; font-weight: 800; color: #1e3a8a; }
-    .em-stat .lbl { font-size: 0.82rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;}
+    .em-stat .val, .em-stat .val * { font-size: 1.6rem; font-weight: 800; color: #1e3a8a !important; }
+    .em-stat .lbl, .em-stat .lbl * { font-size: 0.82rem; color: #64748b !important; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;}
 
-    .em-badge { display:inline-block; padding: 3px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
-    .em-pass { background:#dcfce7; color:#15803d; }
-    .em-fail { background:#fee2e2; color:#b91c1c; }
-    .em-pending { background:#fef9c3; color:#a16207; }
+    .em-badge, .em-badge * { display:inline-block; padding: 3px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
+    .em-pass, .em-pass * { background:#dcfce7; color:#15803d !important; }
+    .em-fail, .em-fail * { background:#fee2e2; color:#b91c1c !important; }
+    .em-pending, .em-pending * { background:#fef9c3; color:#a16207 !important; }
 
-    div[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
-    }
+    div[data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%); }
     div[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
     div[data-testid="stSidebar"] .stButton>button {
         background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
         width: 100%; text-align: left; border-radius: 10px; margin-bottom: 4px;
     }
     div[data-testid="stSidebar"] .stButton>button:hover { background: #2563eb; border-color:#2563eb; }
+    /* Whole dashboard stat cards are now real buttons (see stat_card(),
+       which renders them inside st.container(key="statcard-...")) — style
+       them to clearly look like a card AND look clickable. */
+    div[class*="st-key-statcard"] button {
+        background: white !important; border-radius: 14px !important; padding: 16px 12px !important;
+        border: 1px solid rgba(15,23,42,0.08) !important; border-left: 5px solid #2563eb !important;
+        box-shadow: 0 4px 14px rgba(15,23,42,0.05) !important; color: #1e3a8a !important;
+        font-size: 1.05rem !important; font-weight: 800 !important; text-align: left !important;
+        white-space: pre-line !important; line-height: 1.4 !important;
+    }
+    div[class*="st-key-statcard"] button:hover {
+        border-left: 5px solid #0ea5e9 !important; box-shadow: 0 6px 18px rgba(15,23,42,0.12) !important;
+    }
+    div[class*="st-key-statcard"] button p { color: #1e3a8a !important; font-weight: 800 !important; white-space: pre-line !important; }
 
     .stButton>button {
-        border-radius: 10px; font-weight: 600; padding: 0.5rem 1.1rem;
+        border-radius: 10px; font-weight: 600; padding: 0.5rem 1.1rem; color: #0f172a;
     }
-    .stButton>button[kind="primary"] { background: #2563eb; }
+    .stButton>button[kind="primary"] { background: #2563eb; color: white !important; }
+    .stButton>button[kind="primary"] * { color: white !important; }
 
+    .marksheet, .marksheet * { color: #0f172a; }
     .marksheet {
         background: white; padding: 26px 34px; border-radius: 10px;
         border: 2px solid #1e3a8a; font-family: 'Georgia', serif;
     }
-    .marksheet h2 { text-align:center; color:#1e3a8a; margin: 2px 0; }
-    .marksheet .sub { text-align:center; color:#475569; font-size: 0.9rem; margin-bottom: 10px;}
+    .marksheet h2 { text-align:center; color:#1e3a8a !important; margin: 2px 0; }
+    .marksheet .sub, .marksheet .sub * { text-align:center; color:#475569 !important; font-size: 0.9rem; margin-bottom: 10px;}
     .ms-table { width:100%; border-collapse: collapse; margin-top: 14px; }
     .ms-table th, .ms-table td { border: 1px solid #94a3b8; padding: 7px 10px; font-size: 0.92rem; }
-    .ms-table th { background: #1e3a8a; color: white; }
+    .ms-table th, .ms-table th * { background: #1e3a8a; color: white !important; }
     .ms-table tr:nth-child(even) { background: #f1f5f9; }
 
     @media print {
@@ -176,6 +284,12 @@ CUSTOM_CSS = """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
+def hint(text: str):
+    """Small blue instruction box — used under form headings across every
+    section to tell the user exactly what to enter, as required."""
+    st.markdown(f'<div class="em-hint">ℹ️ {text}</div>', unsafe_allow_html=True)
+
+
 def hero(title: str, subtitle: str = ""):
     st.markdown(
         f"""<div class="em-hero"><h1>🎓 {title}</h1><p>{subtitle}</p></div>""",
@@ -183,11 +297,28 @@ def hero(title: str, subtitle: str = ""):
     )
 
 
-def stat_card(col, label, value):
-    col.markdown(
-        f"""<div class="em-stat"><div class="val">{value}</div><div class="lbl">{label}</div></div>""",
-        unsafe_allow_html=True,
-    )
+def stat_card(col, label, value, nav_key=None):
+    """One big, unmistakably-clickable stat card. Uses a keyed container so
+    our CSS (div[class*="st-key-statcard"]) can style the *actual* <button>
+    — tapping anywhere on the number or label jumps straight to that
+    section with full detail (fixes 'ক্লিক করলে কিছু আসে না')."""
+    safe_key = f"statcard-{(nav_key or 'x')}-{label}".lower().replace(" ", "-")
+    if nav_key:
+        try:
+            box = col.container(key=safe_key)
+        except TypeError:
+            # Older Streamlit without container(key=...) support — still
+            # fully clickable, just without the extra CSS card styling.
+            box = col
+        clicked = box.button(f"{value}\n{label}", key=f"btn_{safe_key}", use_container_width=True)
+        if clicked:
+            st.session_state["nav"] = nav_key
+            st.rerun()
+    else:
+        col.markdown(
+            f"""<div class="em-stat"><div class="val">{value}</div><div class="lbl">{label}</div></div>""",
+            unsafe_allow_html=True,
+        )
 
 
 def badge(text, kind="pending"):
@@ -536,28 +667,72 @@ def init_session():
 
 def do_logout():
     for k in ["logged_in", "role", "school_id", "school_name", "teacher_id",
-              "user_name", "guardian_mode"]:
+              "user_name", "guardian_mode", "guardian_student_id", "guardian_roll"]:
         st.session_state[k] = False if k in ("logged_in", "guardian_mode") else None
     st.rerun()
 
 
 def login_page():
     hero("School Manager BD", "Multi-Tenant School Management & Result System")
-    tab_school, tab_super, tab_guardian = st.tabs(
-        ["🏫 School Staff Login", "🛡️ SuperAdmin", "🎒 Check Result (Student/Guardian)"]
+    # Order requested: Student Login -> Teacher/Staff Login -> SuperAdmin Login
+    tab_student, tab_school, tab_super = st.tabs(
+        ["🎒 Student Login (Check Result)", "🏫 Teacher / Staff Login", "🛡️ SuperAdmin Login"]
     )
+
+    with tab_student:
+        st.markdown('<div class="em-card">', unsafe_allow_html=True)
+        hint("লগইন ছাড়াই আপনার (বা আপনার সন্তানের) প্রকাশিত রেজাল্ট দেখতে — স্কুল বেছে নিয়ে "
+             "Student ID এবং Roll নম্বর দুটোই দিন (দুটো মিলে গেলে তবেই রেজাল্ট দেখাবে, নিরাপত্তার জন্য)।")
+        schools = read_df("Schools")
+        if not schools.empty:
+            options = schools["SchoolName"] + "  (" + schools["SchoolID"] + ")"
+            g_choice = st.selectbox("School", options.tolist(), key="g_school",
+                                     help="আপনার সন্তান যে স্কুলে পড়ে সেটি বেছে নিন।")
+            c1, c2 = st.columns(2)
+            g_student_id = c1.text_input(
+                "Student ID", placeholder="000001-26-S0001",
+                help="মার্কশীট/এডমিট কার্ড/ভর্তি ফর্মে ছাপানো Student ID এখানে হুবহু লিখুন।",
+            )
+            g_roll = c2.text_input(
+                "Roll No.", placeholder="যেমন: 05",
+                help="বর্তমান ক্লাসের Roll নম্বর — Student ID-এর সাথে মিলিয়ে যাচাই করা হবে।",
+            )
+            if st.button("View Result", type="primary"):
+                if not g_student_id.strip() or not g_roll.strip():
+                    st.error("Student ID এবং Roll — দুটোই লিখুন।")
+                else:
+                    g_school_id = g_choice.split("(")[-1].rstrip(")")
+                    st.session_state.update({
+                        "guardian_mode": True, "school_id": g_school_id,
+                        "school_name": g_choice.split("  (")[0], "role": "Guardian",
+                    })
+                    st.session_state["guardian_student_id"] = g_student_id.strip()
+                    st.session_state["guardian_roll"] = g_roll.strip()
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_school:
         st.markdown('<div class="em-card">', unsafe_allow_html=True)
+        hint("আপনার স্কুল বেছে নিন, তারপর আপনার Teacher/Staff ID ও PIN দিন (এই দুটো আপনার স্কুলের "
+             "Headteacher/Admin আপনাকে দিয়েছেন)। ভুলে গেলে Admin-কে জিজ্ঞেস করুন।")
         schools = read_df("Schools")
         if schools.empty:
             st.warning("No schools found in the sheet yet.")
         else:
             active = schools[schools.get("IsActive", "Yes") == "Yes"] if "IsActive" in schools.columns else schools
             options = active["SchoolName"] + "  (" + active["SchoolID"] + ")"
-            choice = st.selectbox("Select your School", options.tolist() if not active.empty else [])
-            teacher_id = st.text_input("Teacher / Staff ID")
-            pin = st.text_input("PIN", type="password")
+            choice = st.selectbox(
+                "Select your School", options.tolist() if not active.empty else [],
+                help="তালিকা থেকে আপনার স্কুলের নাম বেছে নিন। (SchoolID বন্ধনীতে দেখানো আছে)",
+            )
+            teacher_id = st.text_input(
+                "Teacher / Staff ID", placeholder="যেমন: 000001-T001",
+                help="আপনার স্কুলের Admin আপনাকে যে Teacher ID দিয়েছেন সেটা লিখুন।",
+            )
+            pin = st.text_input(
+                "PIN", type="password", placeholder="৪ সংখ্যার গোপন PIN",
+                help="আপনার গোপন PIN নম্বর — কাউকে শেয়ার করবেন না।",
+            )
             if st.button("Login", type="primary", key="staff_login"):
                 if not choice:
                     st.error("Please select a school.")
@@ -588,7 +763,13 @@ def login_page():
 
     with tab_super:
         st.markdown('<div class="em-card">', unsafe_allow_html=True)
-        pw = st.text_input("SuperAdmin Password", type="password", key="sa_pw")
+        hint("এই ট্যাবটি শুধু মূল Super Administrator-এর জন্য (যিনি সব স্কুল পরিচালনা করেন)। "
+             "স্কুল স্টাফ/টিচার হলে 'Teacher / Staff Login' ট্যাব ব্যবহার করুন।")
+        pw = st.text_input(
+            "SuperAdmin Password", type="password", key="sa_pw",
+            placeholder="আপনার secrets.toml-এ রাখা SUPERADMIN_PASSWORD",
+            help="এটি .streamlit/secrets.toml ফাইলে SUPERADMIN_PASSWORD হিসেবে সেট করা আছে।",
+        )
         if st.button("Login as SuperAdmin", type="primary"):
             expected = st.secrets.get("SUPERADMIN_PASSWORD", "")
             if expected and pw == expected:
@@ -600,24 +781,6 @@ def login_page():
                 st.rerun()
             else:
                 st.error("Incorrect password.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_guardian:
-        st.markdown('<div class="em-card">', unsafe_allow_html=True)
-        st.caption("View a published result without logging in.")
-        schools = read_df("Schools")
-        if not schools.empty:
-            options = schools["SchoolName"] + "  (" + schools["SchoolID"] + ")"
-            g_choice = st.selectbox("School", options.tolist(), key="g_school")
-            g_student_id = st.text_input("Student ID (e.g. 000001-26-S0001)")
-            if st.button("View Result"):
-                g_school_id = g_choice.split("(")[-1].rstrip(")")
-                st.session_state.update({
-                    "guardian_mode": True, "school_id": g_school_id,
-                    "school_name": g_choice.split("  (")[0], "role": "Guardian",
-                })
-                st.session_state["guardian_student_id"] = g_student_id.strip()
-                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1082,11 +1245,19 @@ def page_dashboard():
         subs = read_df("Subscriptions")
         pays = read_df("PaymentLogs")
         c1, c2, c3, c4 = st.columns(4)
-        stat_card(c1, "Total Schools", len(schools))
-        stat_card(c2, "Active Schools", (schools.get("IsActive", pd.Series(dtype=str)) == "Yes").sum() if not schools.empty else 0)
-        stat_card(c3, "Active Subscriptions", (subs.get("Status", pd.Series(dtype=str)) == "Active").sum() if not subs.empty else 0)
+        stat_card(c1, "Total Schools", len(schools), nav_key="superadmin")
+        stat_card(c2, "Active Schools", (schools.get("IsActive", pd.Series(dtype=str)) == "Yes").sum() if not schools.empty else 0, nav_key="superadmin")
+        stat_card(c3, "Active Subscriptions", (subs.get("Status", pd.Series(dtype=str)) == "Active").sum() if not subs.empty else 0, nav_key="superadmin")
         total_paid = num(pays["Amount"]).sum() if not pays.empty and "Amount" in pays.columns else 0
-        stat_card(c4, "Total Collected (৳)", f"{total_paid:,.0f}")
+        stat_card(c4, "Total Collected (৳)", f"{total_paid:,.0f}", nav_key="superadmin")
+        st.caption("👆 উপরের যেকোনো কার্ডে ট্যাপ করুন — সরাসরি সেই বিভাগের বিস্তারিত তথ্যে চলে যাবেন।")
+        with st.expander("🔍 বিস্তারিত দেখুন (Quick Detail Preview)"):
+            st.markdown("**Schools**")
+            st.dataframe(schools, use_container_width=True, hide_index=True)
+            st.markdown("**Subscriptions**")
+            st.dataframe(subs if not subs.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+            st.markdown("**Recent Payments**")
+            st.dataframe(pays.tail(10) if not pays.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
         st.markdown("### Recent Schools")
         st.dataframe(schools, use_container_width=True, hide_index=True)
         return
@@ -1095,11 +1266,38 @@ def page_dashboard():
     teachers = read_df("Teachers", school_id=school_id)
     results = read_df("Results", school_id=school_id)
     c1, c2, c3, c4 = st.columns(4)
-    stat_card(c1, "Total Students", len(students) if not students.empty else 0)
-    stat_card(c2, "Total Teachers", len(teachers) if not teachers.empty else 0)
-    stat_card(c3, "Results Generated", len(results) if not results.empty else 0)
+    can_manage = role in ADMIN_LIKE_ROLES or role == ROLE_TEACHER
+    stat_card(c1, "Total Students", len(students) if not students.empty else 0, nav_key="students" if can_manage else None)
+    stat_card(c2, "Total Teachers", len(teachers) if not teachers.empty else 0,
+              nav_key="teachers" if role in ADMIN_LIKE_ROLES else None)
+    stat_card(c3, "Results Generated", len(results) if not results.empty else 0,
+              nav_key="results" if role in ADMIN_LIKE_ROLES else "print")
     published = (results.get("Published", pd.Series(dtype=str)) == "Yes").sum() if not results.empty else 0
-    stat_card(c4, "Published Results", published)
+    stat_card(c4, "Published Results", published, nav_key="print")
+    st.caption("👆 উপরের যেকোনো কার্ডে ট্যাপ করুন — সরাসরি সেই বিভাগের বিস্তারিত তালিকায় চলে যাবেন।")
+
+    with st.expander("🔍 বিস্তারিত দেখুন (Quick Detail Preview)"):
+        dcol1, dcol2 = st.columns(2)
+        with dcol1:
+            st.markdown("**সাম্প্রতিক ছাত্র-ছাত্রী (Recent Students)**")
+            if not students.empty:
+                cols = [c for c in ["StudentID", "StudentName", "Class", "Section", "Roll"] if c in students.columns]
+                st.dataframe(students[cols].tail(10), use_container_width=True, hide_index=True)
+            else:
+                st.caption("কোনো ছাত্র-ছাত্রী যোগ করা হয়নি।")
+        with dcol2:
+            st.markdown("**টিচার তালিকা (Teachers)**")
+            if not teachers.empty:
+                cols = [c for c in ["TeacherID", "Name", "Role", "Subject"] if c in teachers.columns]
+                st.dataframe(teachers[cols], use_container_width=True, hide_index=True)
+            else:
+                st.caption("কোনো টিচার যোগ করা হয়নি।")
+        st.markdown("**সাম্প্রতিক রেজাল্ট (Recent Results)**")
+        if not results.empty:
+            cols = [c for c in ["StudentID", "Class", "Section", "Percentage", "FinalGrade", "Status", "Published"] if c in results.columns]
+            st.dataframe(results[cols].tail(10), use_container_width=True, hide_index=True)
+        else:
+            st.caption("এখনো কোনো রেজাল্ট তৈরি হয়নি।")
 
     st.markdown("### 📢 Latest Notices")
     notices = read_df("Notices", school_id=school_id)
@@ -1124,6 +1322,9 @@ def _class_section_options(school_id):
 def page_marks_entry():
     role, school_id, actor = st.session_state["role"], st.session_state["school_id"], st.session_state["user_name"]
     hero("📝 Marks Entry", "Enter marks — grade, GPA and pass/fail are calculated live.")
+    hint("প্রথমে Exam, Class, Section ও Subject বেছে নিন — নিচে শুধু সেই Subject-এর যোগ্য "
+         "ছাত্র-ছাত্রীদের (তাদের Group ও Religion অনুযায়ী) তালিকা আসবে। নম্বর দেওয়ার পর 'Save Marks' চাপুন — "
+         "Grade/GPA/Pass-Fail নিজে থেকেই হিসাব হয়ে যাবে।")
 
     exams = read_df("Exams", school_id=school_id)
     subjects = read_df("Subjects", school_id=school_id)
@@ -1245,6 +1446,8 @@ def page_marks_entry():
 def page_generate_results():
     school_id, actor = st.session_state["school_id"], st.session_state["user_name"]
     hero("📊 Generate & Publish Results", "Compile subject marks into final results with class merit ranking.")
+    hint("Exam, Class, Section বেছে 'Generate / Refresh Results' চাপুন — সব সাবজেক্টের নম্বর যোগ হয়ে "
+         "GPA/Grade/মেধাক্রম হিসাব হবে। ফলাফল ঠিক আছে দেখে নিয়ে 'Publish' চাপলেই ছাত্র/অভিভাবক দেখতে পাবে।")
 
     exams = read_df("Exams", school_id=school_id)
     students, classes = _class_section_options(school_id)
@@ -1294,6 +1497,8 @@ def page_generate_results():
 def page_consolidated():
     school_id, actor = st.session_state["school_id"], st.session_state["user_name"]
     hero("🏆 Consolidated Annual Results & Promotion", "Weighted across all exams · auto-generates next class roll numbers.")
+    hint("বার্ষিক পরীক্ষার পর এই পেজ থেকে সব সেমিস্টারের ফলাফল একসাথে করে চূড়ান্ত GPA/Grade বের করুন এবং "
+         "'Apply Promotion' চাপলে পাশ করা ছাত্র-ছাত্রীরা পরের ক্লাসে নতুন (শাখাসহ) রোল নিয়ে উঠে যাবে।")
 
     students, classes = _class_section_options(school_id)
     exams = read_df("Exams", school_id=school_id)
@@ -1349,6 +1554,8 @@ def page_print_center():
     school_id = st.session_state["school_id"]
     role = st.session_state["role"]
     hero("🖨️ Print Center", "Marksheets & Admit Cards — print-ready, publish-locked.")
+    hint("Marksheet ট্যাব থেকে Exam/Class/Section/Student বেছে সুন্দর ডিজাইনের মার্কশীট বানান; "
+         "Admit Card ট্যাব থেকে রুটিনসহ এডমিট কার্ড বানান। যেকোনোটাতে '🖨️ Print / Save as PDF' চাপলেই ব্রাউজারের প্রিন্ট ডায়ালগ খুলবে — সেখান থেকে PDF সেভ বা প্রিন্ট করতে পারবেন।")
 
     schools = read_df("Schools")
     school_row = schools[schools["SchoolID"] == school_id].iloc[0] if not schools.empty else pd.Series()
@@ -1415,26 +1622,30 @@ def page_print_center():
 def page_teachers():
     school_id = st.session_state["school_id"]
     hero("👩‍🏫 Teachers & Staff", "Manage staff accounts. PINs are masked for security.")
+    hint("নতুন টিচার/স্টাফ যোগ করতে নিচের ফর্ম পূরণ করুন। Role বেছে নিন — Headteacher/Admin সব দেখবে, "
+         "Teacher নিজের ক্লাসের কাজ করবে, Clerk শুধু নোটিশ দেবে, আর '(No Role)' দিলে সে শুধু সীমিত তথ্য দেখবে। "
+         "তৈরি হওয়া PIN-টি গোপনে ওই টিচারকে জানিয়ে দিন।")
     teachers = read_df("Teachers", school_id=school_id)
 
     with st.expander("➕ Add New Teacher / Staff"):
         with st.form("add_teacher"):
             c1, c2, c3 = st.columns(3)
-            name = c1.text_input("Name")
+            name = c1.text_input("Name", placeholder="যেমন: Md. Karim Uddin")
             role_choice = c2.selectbox(
                 "Role", [ROLE_ADMIN, ROLE_TEACHER, ROLE_CLERK, "Headmaster", "(No Role — limited view-only Staff)"],
                 help="Pick '(No Role)' for staff who should only see limited school info with no editing rights."
             )
             role_ = "" if role_choice.startswith("(No Role") else role_choice
-            designation = c3.text_input("Designation")
+            designation = c3.text_input("Designation", placeholder="যেমন: Assistant Teacher")
             c4, c5, c6 = st.columns(3)
-            klass = c4.text_input("Class (if class teacher)")
-            section = c5.text_input("Section")
-            subject = c6.text_input("Subject")
+            klass = c4.text_input("Class (if class teacher)", placeholder="যেমন: Class-9")
+            section = c5.text_input("Section", placeholder="যেমন: A")
+            subject = c6.text_input("Subject", placeholder="যেমন: Bangla")
             c7, c8, c9 = st.columns(3)
-            phone = c7.text_input("Phone")
-            email = c8.text_input("Email")
-            pin = c9.text_input("Set PIN", value=str(np.random.randint(1000, 9999)))
+            phone = c7.text_input("Phone", placeholder="01XXXXXXXXX")
+            email = c8.text_input("Email", placeholder="name@example.com")
+            pin = c9.text_input("Set PIN", value=str(np.random.randint(1000, 9999)),
+                                 help="৪ সংখ্যার একটি PIN অটো বসানো আছে — চাইলে বদলে দিন। এটি লগইনের সময় লাগবে।")
             if st.form_submit_button("Add Teacher", type="primary"):
                 tid = next_seq_id(school_id, "Teachers", "TeacherID", "T", width=3, include_year=False)
                 new = pd.DataFrame([{
@@ -1477,29 +1688,36 @@ def page_teachers():
 def page_students():
     school_id = st.session_state["school_id"]
     hero("🎒 Students", "Manage student records.")
+    hint("নতুন ছাত্র-ছাত্রী যোগ করতে ফর্ম পূরণ করুন। Group (Science/Commerce/Arts/Core) ও Religion অনুযায়ী "
+         "Marks Entry ও Marksheet-এ শুধু তার নিজের প্রযোজ্য সাবজেক্টই দেখাবে/আসবে — তাই এই দুটো ঠিকভাবে দিন।")
     students = read_df("Students", school_id=school_id)
 
     with st.expander("➕ Add New Student"):
         with st.form("add_student"):
             c1, c2, c3 = st.columns(3)
-            name = c1.text_input("Student Name")
-            klass = c2.text_input("Class")
-            section = c3.text_input("Section")
+            name = c1.text_input("Student Name", placeholder="যেমন: Karim Ahmed")
+            klass = c2.text_input("Class", placeholder="যেমন: Class-9")
+            section = c3.text_input("Section", placeholder="যেমন: A")
             c4, c5, c6 = st.columns(3)
-            roll = c4.text_input("Roll")
+            roll = c4.text_input("Roll", placeholder="যেমন: 05")
             session_year = c5.text_input("Session", value=datetime.now().strftime("%Y"))
             gender = c6.selectbox("Gender", ["Male", "Female", "Other"])
-            c7, c8 = st.columns(2)
-            father = c7.text_input("Father's Name")
-            mother = c8.text_input("Mother's Name")
-            phone = st.text_input("Guardian Phone")
+            c7, c8, c9 = st.columns(3)
+            group = c7.selectbox("Group (বিভাগ)", ["Core", "Science", "Commerce", "Arts"],
+                                  help="ক্লাস ৯-১০ হলে Science/Commerce/Arts বেছে নিন; না হলে 'Core' রাখুন।")
+            religion = c8.selectbox("Religion (ধর্ম)", ["Islam", "Hindu", "Christian", "Buddhist", "Other"],
+                                     help="ধর্ম বিষয়ের মার্কশীটে শুধু নিজের ধর্মের সাবজেক্টই দেখানোর জন্য দরকার।")
+            father = c9.text_input("Father's Name")
+            c10, c11 = st.columns(2)
+            mother = c10.text_input("Mother's Name")
+            phone = c11.text_input("Guardian Phone", placeholder="01XXXXXXXXX")
             if st.form_submit_button("Add Student", type="primary"):
                 sid = next_seq_id(school_id, "Students", "StudentID", "S")
                 new = pd.DataFrame([{
                     "SchoolID": school_id, "StudentID": sid, "Roll": roll, "Class": klass,
-                    "Section": section, "Group": "Core", "StudentName": name, "FatherName": father,
-                    "MotherName": mother, "Phone": phone, "Status": "Active", "Gender": gender,
-                    "Session": session_year,
+                    "Section": section, "Group": group, "Religion": religion, "StudentName": name,
+                    "FatherName": father, "MotherName": mother, "Phone": phone, "Status": "Active",
+                    "Gender": gender, "Session": session_year,
                 }])
                 upsert_rows("Students", new, key_cols=["StudentID"])
                 st.success(f"Added {name} — ID: {sid}")
@@ -1525,9 +1743,11 @@ def page_notices():
     school_id, role, actor = st.session_state["school_id"], st.session_state["role"], st.session_state["user_name"]
     hero("📢 Notices", "School-wide announcements.")
     if role in (ROLE_ADMIN, ROLE_CLERK, "Headmaster", "Headteacher"):
+        hint("একটি শিরোনাম ও বিস্তারিত লিখে 'Publish Notice' চাপুন — সাথে সাথে স্কুলের সবাই "
+             "(টিচার/স্টাফ) তাদের Dashboard ও Notices পেজে এটি দেখতে পাবে।")
         with st.form("add_notice"):
-            title = st.text_input("Title")
-            desc = st.text_area("Description")
+            title = st.text_input("Title", placeholder="যেমন: বার্ষিক পরীক্ষার রুটিন প্রকাশ")
+            desc = st.text_area("Description", placeholder="নোটিশের সম্পূর্ণ বিবরণ এখানে লিখুন...")
             if st.form_submit_button("Publish Notice", type="primary"):
                 nid = next_seq_id(school_id, "Notices", "NoticeID", "N")
                 append_row("Notices", {
@@ -2046,18 +2266,24 @@ def page_other_records():
 def page_guardian_result():
     school_id = st.session_state["school_id"]
     student_id = st.session_state.get("guardian_student_id", "")
+    roll_input = str(st.session_state.get("guardian_roll", "")).strip()
     hero("🎒 My Result", st.session_state["school_name"])
     schools = read_df("Schools")
     school_row = schools[schools["SchoolID"] == school_id].iloc[0] if not schools.empty else pd.Series()
     students = read_df("Students", school_id=school_id)
     student_row_df = students[students["StudentID"] == student_id]
     if student_row_df.empty:
-        st.error("Student ID not found. Please check and try again.")
+        st.error("Student ID not found. দয়া করে সঠিক Student ID দিন।")
         if st.button("← Back to Login"):
             do_logout()
         return
     student_row = student_row_df.iloc[0]
-    st.success(f"Showing results for **{student_row.get('StudentName')}** (Class {student_row.get('Class')})")
+    if roll_input and str(student_row.get("Roll", "")).strip() != roll_input:
+        st.error("Student ID ঠিক আছে, কিন্তু Roll নম্বর মিলছে না। আবার চেষ্টা করুন।")
+        if st.button("← Back to Login"):
+            do_logout()
+        return
+    st.success(f"Showing results for **{student_row.get('StudentName')}** (Class {student_row.get('Class')}, Roll {student_row.get('Roll')})")
 
     results = read_df("Results", school_id=school_id)
     my_results = results[(results["StudentID"] == student_id) & (results["Published"] == "Yes")] if not results.empty else pd.DataFrame()
