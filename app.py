@@ -81,6 +81,8 @@ ROLE_SUPERADMIN = "SuperAdmin"
 ROLE_ADMIN = "Admin"          # Headteacher / School Admin
 ROLE_TEACHER = "Teacher"
 ROLE_CLERK = "Clerk"
+ROLE_STAFF = ""                # blank Role cell = ordinary staff, view-only, per spec
+ADMIN_LIKE_ROLES = (ROLE_ADMIN, "Headmaster", "Headteacher")
 ALL_STAFF_ROLES = [ROLE_ADMIN, ROLE_TEACHER, ROLE_CLERK, "Headmaster", "Headteacher"]
 
 # Sheets that are scoped per-school (every one of these has a SchoolID column)
@@ -99,6 +101,7 @@ REQUIRED_EXTRA_HEADERS = {
     "ConsolidatedResults": ["Published", "PublishedDate", "PublishedBy"],
     "Marks": ["EnteredBy", "EnteredDate"],
     "Teachers": ["Password"],
+    "ExamDuties": ["ExamDate"],
 }
 
 # =============================================================================
@@ -190,6 +193,54 @@ def stat_card(col, label, value):
 def badge(text, kind="pending"):
     cls = {"pass": "em-pass", "fail": "em-fail", "pending": "em-pending"}.get(kind, "em-pending")
     return f'<span class="em-badge {cls}">{text}</span>'
+
+
+def logo_tag(school_row, height=64):
+    """Render the school logo (works with a plain image URL OR a base64 data
+    string saved in the 'Logo' column) for use on every printed document.
+    Returns '' safely if no logo is set, so templates never break."""
+    logo = str(school_row.get("Logo", "") or "").strip()
+    if not logo:
+        return ""
+    src = logo if logo.startswith("http") or logo.startswith("data:") else f"data:image/png;base64,{logo}"
+    return f'<img src="{src}" style="height:{height}px;max-width:160px;object-fit:contain;" />'
+
+
+def doc_header(school_row, title, subtitle=""):
+    """Shared header block (logo + school name + address/EIIN + document
+    title) used across Marksheet / Admit Card / Certificates / Guard List /
+    Seat Plan / Script Register so every printed paper looks consistent and
+    always carries the school logo, as required."""
+    logo = logo_tag(school_row)
+    return f"""
+    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:6px;">
+        {logo}
+        <div>
+            <h2 style="margin:0;">{school_row.get('SchoolName','')}</h2>
+            <div class="sub">{school_row.get('Address','')} &nbsp;|&nbsp; EIIN: {school_row.get('SchoolEIIN','N/A')}</div>
+        </div>
+    </div>
+    <h3 style="text-align:center;text-decoration:underline;margin-top:2px;">{title}</h3>
+    {f'<div class="sub" style="text-align:center;">{subtitle}</div>' if subtitle else ''}
+    """
+
+
+def student_eligible_for_subject(student_row: pd.Series, subject_row: pd.Series) -> bool:
+    """Group + Religion aware subject eligibility check — used everywhere a
+    subject's student-list is built, so Marks Entry / Marksheets automatically
+    show only 'যার যার' (each student's own) Group and Religion subjects,
+    never every subject configured for the class."""
+    subj_group = str(subject_row.get("Group", "") or "").strip()
+    if subj_group and subj_group.lower() not in ("core", "all", "general", "common"):
+        if subj_group != str(student_row.get("Group", "") or "").strip():
+            return False
+    is_religion = str(subject_row.get("IsReligion", "") or "").strip().lower() == "yes"
+    if is_religion:
+        appl = str(subject_row.get("ApplicableReligion", "") or "").strip()
+        stu_religion = str(student_row.get("Religion", "") or "").strip()
+        if appl and stu_religion and appl != stu_religion:
+            return False
+    return True
 
 
 # =============================================================================
@@ -724,14 +775,16 @@ def generate_consolidated(school_id, session_year, klass, section, actor_name=""
         rows.append(row)
 
     cdf = pd.DataFrame(rows)
-    # ---- Merit ranking + Next Roll, grouped per PromotedClass ----
+    # ---- Merit ranking + Next Roll, grouped per PromotedClass + Section ----
+    # Roll is generated per-section ("শাখা অনুযায়ী শাখাসহ রোল") so each
+    # section restarts its own 1..N roll numbering after promotion.
     cdf["NextRoll"] = ""
-    for pclass, grp in cdf.groupby("PromotedClass"):
+    for (pclass, psec), grp in cdf.groupby(["PromotedClass", "Section"]):
         ranked = grp[grp["Status"] == "Passed"].sort_values(
             ["ConsolidatedGPA", "ConsolidatedTotal"], ascending=[False, False]
         )
         for i, idx in enumerate(ranked.index, start=1):
-            cdf.at[idx, "NextRoll"] = str(i)
+            cdf.at[idx, "NextRoll"] = f"{psec}-{i:02d}"
 
     existing = read_df("ConsolidatedResults", school_id=school_id)
     cdf["ConsolidatedID"] = ""
@@ -794,9 +847,7 @@ def render_marksheet(school_row, student_row, result_row, marks_df, subjects_df,
     status_color = "#15803d" if status == "Passed" else "#b91c1c"
     html = f"""
     <div class="marksheet">
-        <h2>{school_row.get('SchoolName','')}</h2>
-        <div class="sub">{school_row.get('Address','')} &nbsp;|&nbsp; EIIN: {school_row.get('SchoolEIIN','N/A')}</div>
-        <h3 style="text-align:center;text-decoration:underline;">ACADEMIC MARKSHEET — {exam_name}</h3>
+        {doc_header(school_row, f"ACADEMIC MARKSHEET — {exam_name}")}
         <table style="width:100%;margin-top:10px;">
             <tr>
                 <td><b>Student:</b> {student_row.get('StudentName','')}</td>
@@ -836,23 +887,176 @@ def render_marksheet(school_row, student_row, result_row, marks_df, subjects_df,
 
 
 def render_admit_card(school_row, student_row, exam_name, routine_df):
+    """One admit card, WITH its exam routine printed on the same card (so the
+    admit card and routine are always together on paper, as required)."""
     sched_rows = ""
-    for _, r in routine_df.iterrows():
-        sched_rows += f"<tr><td>{r.get('ExamDate','')}</td><td>{r.get('DayName','')}</td><td>{r.get('StartTime','')} - {r.get('EndTime','')}</td></tr>"
+    for _, r in routine_df.sort_values("ExamDate").iterrows() if not routine_df.empty else []:
+        sched_rows += (
+            f"<tr><td>{r.get('ExamDate','')}</td><td>{r.get('DayName','')}</td>"
+            f"<td>{r.get('StartTime','')} - {r.get('EndTime','')}</td>"
+            f"<td>{r.get('SubjectID','')}</td><td>{r.get('Classes', r.get('RoomID',''))}</td></tr>"
+        )
     html = f"""
-    <div class="marksheet" style="max-width:640px;margin:auto;">
-        <h2>{school_row.get('SchoolName','')}</h2>
-        <div class="sub">Admit Card — {exam_name}</div>
+    <div class="marksheet" style="max-width:100%;">
+        {doc_header(school_row, f"Admit Card — {exam_name}")}
         <table style="width:100%;margin-top:10px;">
             <tr><td><b>Name:</b> {student_row.get('StudentName','')}</td><td><b>ID:</b> {student_row.get('StudentID','')}</td></tr>
             <tr><td><b>Class:</b> {student_row.get('Class','')}</td><td><b>Section:</b> {student_row.get('Section','')}</td></tr>
             <tr><td><b>Roll:</b> {student_row.get('Roll','')}</td><td><b>Session:</b> {student_row.get('Session','')}</td></tr>
         </table>
-        <table class="ms-table"><tr><th>Date</th><th>Day</th><th>Time</th></tr>{sched_rows}</table>
-        <div style="display:flex;justify-content:space-between;margin-top:50px;">
+        <table class="ms-table"><tr><th>Date</th><th>Day</th><th>Time</th><th>Subject</th><th>Room</th></tr>{sched_rows}</table>
+        <div style="display:flex;justify-content:space-between;margin-top:40px;">
             <div>_____________________<br/>Student Signature</div>
+            <div>_____________________<br/>Class Teacher</div>
             <div>_____________________<br/>Headteacher</div>
         </div>
+    </div>
+    """
+    return html
+
+
+def render_admit_cards_2up(school_row, cards: list):
+    """Lay out admit cards two-per-A4-page for printing (each card already
+    contains its routine). 'cards' is a list of pre-rendered card HTML strings."""
+    pages = ""
+    for i in range(0, len(cards), 2):
+        pair = cards[i:i + 2]
+        cells = "".join(f'<div style="flex:1;border:1px dashed #94a3b8;padding:10px;">{c}</div>' for c in pair)
+        pages += (
+            '<div style="display:flex;gap:10px;width:100%;page-break-after:always;'
+            f'min-height:48vh;">{cells}</div>'
+        )
+    return pages
+
+
+def render_certificate(school_row, student_row, cert_type: str, extra: dict = None):
+    """Auto-generates one of the three certificate types:
+      - 'testimonial'  -> প্রশংসাপত্র (character/conduct testimonial)
+      - 'transfer'     -> ছাড়পত্র (Transfer / School-Leaving Certificate)
+      - 'certification'-> প্রত্যয়নপত্র (bonafide/attendance certification)
+    """
+    extra = extra or {}
+    titles = {
+        "testimonial": "TESTIMONIAL (প্রশংসাপত্র)",
+        "transfer": "TRANSFER CERTIFICATE (ছাড়পত্র)",
+        "certification": "CERTIFICATION (প্রত্যয়নপত্র)",
+    }
+    title = titles.get(cert_type, "Certificate")
+    today = datetime.now().strftime("%d-%m-%Y")
+
+    if cert_type == "transfer":
+        body = f"""
+        <p>This is to certify that <b>{student_row.get('StudentName','')}</b>, son/daughter of
+        <b>{student_row.get('FatherName','')}</b> and <b>{student_row.get('MotherName','')}</b>,
+        Student ID <b>{student_row.get('StudentID','')}</b>, was a bona fide student of this
+        institution in Class <b>{student_row.get('Class','')}</b>, Section <b>{student_row.get('Section','')}</b>,
+        Roll <b>{student_row.get('Roll','')}</b>, Session <b>{student_row.get('Session','')}</b>.</p>
+        <p>Reason for leaving: <b>{student_row.get('TCReason','') or extra.get('reason','N/A')}</b>.</p>
+        <p>Character during his/her stay in this institution was
+        <b>{student_row.get('CharacterStatus','') or extra.get('character','Good')}</b>, and all dues have been
+        <b>{student_row.get('DuesStatus','') or extra.get('dues','cleared')}</b>.</p>
+        <p>He/She is hereby permitted to be admitted to another institution.</p>
+        """
+    elif cert_type == "certification":
+        body = f"""
+        <p>This is to certify that <b>{student_row.get('StudentName','')}</b>,
+        Student ID <b>{student_row.get('StudentID','')}</b>, is/was a bona fide student of this
+        institution, studying in Class <b>{student_row.get('Class','')}</b>, Section
+        <b>{student_row.get('Section','')}</b>, Roll <b>{student_row.get('Roll','')}</b>,
+        Session <b>{student_row.get('Session','')}</b>.</p>
+        <p>{extra.get('purpose_line', 'This certificate is issued on the student/guardian\'s request for necessary purposes.')}</p>
+        """
+    else:  # testimonial
+        body = f"""
+        <p>This is to certify that <b>{student_row.get('StudentName','')}</b>, son/daughter of
+        <b>{student_row.get('FatherName','')}</b>, Student ID <b>{student_row.get('StudentID','')}</b>,
+        was a student of Class <b>{student_row.get('Class','')}</b>, Section
+        <b>{student_row.get('Section','')}</b>, Roll <b>{student_row.get('Roll','')}</b> of this
+        institution during the session <b>{student_row.get('Session','')}</b>.</p>
+        <p>During this period his/her conduct and character were found to be
+        <b>{extra.get('character', 'good and satisfactory')}</b>. We wish him/her every success in life.</p>
+        """
+
+    html = f"""
+    <div class="marksheet" style="max-width:760px;margin:auto;min-height:480px;">
+        {doc_header(school_row, title)}
+        <div style="font-size:1rem;line-height:1.9;margin-top:18px;text-align:justify;">
+            {body}
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:70px;">
+            <div>Date: {extra.get('issue_date', today)}</div>
+            <div>_____________________<br/>Headteacher &amp; Signature/Seal</div>
+        </div>
+    </div>
+    """
+    return html
+
+
+def render_guard_list(school_row, exam_name, duty_rows: pd.DataFrame, teacher_lookup: dict):
+    body = ""
+    for _, d in duty_rows.iterrows():
+        invigilators = ", ".join(
+            teacher_lookup.get(d.get(c, ""), d.get(c, ""))
+            for c in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"] if d.get(c, "")
+        )
+        body += (
+            f"<tr><td>{d.get('RoomNo','')}</td><td>{d.get('AssignedClasses','')}</td>"
+            f"<td>{invigilators}</td><td>{d.get('Status','')}</td><td>{d.get('Notes','')}</td></tr>"
+        )
+    html = f"""
+    <div class="marksheet">
+        {doc_header(school_row, f"Exam Guard / Duty List — {exam_name}")}
+        <table class="ms-table">
+            <tr><th>Room</th><th>Class(es)</th><th>Invigilator(s)</th><th>Status</th><th>Notes</th></tr>
+            {body}
+        </table>
+        <div style="display:flex;justify-content:space-between;margin-top:50px;">
+            <div>_____________________<br/>Prepared By</div>
+            <div>_____________________<br/>Headteacher</div>
+        </div>
+    </div>
+    """
+    return html
+
+
+def render_seat_plan(school_row, exam_name, room_no, plan_df: pd.DataFrame):
+    body = ""
+    for _, s in plan_df.iterrows():
+        body += (
+            f"<tr><td>{s.get('BenchNo','')}</td><td>{s.get('SeatPosition','')}</td>"
+            f"<td>{s.get('StudentID','')}</td><td>{s.get('Roll','')}</td>"
+            f"<td>{s.get('Class','')}-{s.get('Section','')}</td><td>&nbsp;</td></tr>"
+        )
+    html = f"""
+    <div class="marksheet">
+        {doc_header(school_row, f"Seat Plan — {exam_name}", f"Room: {room_no}")}
+        <table class="ms-table">
+            <tr><th>Bench</th><th>Position</th><th>Student ID</th><th>Roll</th><th>Class-Section</th><th>Signature</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    return html
+
+
+def render_script_sheet(school_row, exam_name, dist_rows: pd.DataFrame, subject_lookup: dict):
+    body = ""
+    for _, d in dist_rows.iterrows():
+        body += (
+            f"<tr><td>{subject_lookup.get(d.get('SubjectID',''), d.get('SubjectID',''))}</td>"
+            f"<td>{d.get('Class','')}-{d.get('Section','')}</td><td>{d.get('TeacherID','')}</td>"
+            f"<td>{d.get('TotalScriptsHandedOver','')}</td><td>{d.get('HandoverDate','')}</td>"
+            f"<td>{d.get('ReturnedScriptsCount','')}</td><td>{d.get('ReturnDate','')}</td>"
+            f"<td>{d.get('ReturnStatus','')}</td></tr>"
+        )
+    html = f"""
+    <div class="marksheet">
+        {doc_header(school_row, f"Answer-Script Handover / Return Register — {exam_name}")}
+        <table class="ms-table">
+            <tr><th>Subject</th><th>Class-Section</th><th>Teacher</th><th>Handed Over</th>
+            <th>Handover Date</th><th>Returned</th><th>Return Date</th><th>Status</th></tr>
+            {body}
+        </table>
     </div>
     """
     return html
@@ -950,8 +1154,14 @@ def page_marks_entry():
 
     cls_students = students[(students["Class"] == klass) & (students["Section"] == section)
                              & (students.get("Status", "Active") == "Active")].copy()
+    # Group + Religion aware filtering: a student only appears for a subject
+    # that actually applies to them (their own Group / their own Religion).
+    if not cls_students.empty:
+        eligible_mask = cls_students.apply(lambda r: student_eligible_for_subject(r, subject_row), axis=1)
+        cls_students = cls_students[eligible_mask]
     if cls_students.empty:
-        st.info("No active students in this Class / Section.")
+        st.info("No active students eligible for this subject in this Class / Section "
+                "(check the subject's Group / Religion settings).")
         return
 
     existing_marks = read_df("Marks", school_id=school_id)
@@ -1211,7 +1421,11 @@ def page_teachers():
         with st.form("add_teacher"):
             c1, c2, c3 = st.columns(3)
             name = c1.text_input("Name")
-            role_ = c2.selectbox("Role", [ROLE_ADMIN, ROLE_TEACHER, ROLE_CLERK, "Headmaster"])
+            role_choice = c2.selectbox(
+                "Role", [ROLE_ADMIN, ROLE_TEACHER, ROLE_CLERK, "Headmaster", "(No Role — limited view-only Staff)"],
+                help="Pick '(No Role)' for staff who should only see limited school info with no editing rights."
+            )
+            role_ = "" if role_choice.startswith("(No Role") else role_choice
             designation = c3.text_input("Designation")
             c4, c5, c6 = st.columns(3)
             klass = c4.text_input("Class (if class teacher)")
@@ -1375,7 +1589,7 @@ def page_routines():
 
 def page_superadmin():
     hero("🛡️ SuperAdmin Console", "Schools, subscriptions & payment tracking (bKash / Nagad).")
-    tab1, tab2, tab3 = st.tabs(["🏫 Schools", "💳 Subscriptions", "🧾 Payment Logs"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🏫 Schools", "👑 School Admins", "💳 Subscriptions", "🧾 Payment Logs"])
 
     with tab1:
         schools = read_df("Schools")
@@ -1386,18 +1600,74 @@ def page_superadmin():
                 name = c1.text_input("School Name")
                 phone = c2.text_input("Phone")
                 address = st.text_input("Address")
-                exam_system = st.selectbox("Exam System", ["3-Term", "2-Term", "Semester"])
+                c3, c4 = st.columns(2)
+                eiin = c3.text_input("School EIIN")
+                exam_system = c4.selectbox("Exam System", ["3-Term", "2-Term", "Semester"])
+                logo_url = st.text_input("Logo URL (or paste a base64 string — shown on every printed document)")
                 if st.form_submit_button("Create School", type="primary"):
                     n = len(schools) + 1
                     sid = f"SCH-{n:06d}"
                     append_row("Schools", {
                         "SchoolID": sid, "SchoolName": name, "Address": address, "Phone": phone,
-                        "IsActive": "Yes", "ExamSystem": exam_system,
+                        "SchoolEIIN": eiin, "Logo": logo_url, "IsActive": "Yes", "ExamSystem": exam_system,
                     })
                     st.success(f"School created: {sid}")
                     st.rerun()
 
+        if not schools.empty:
+            st.markdown("#### ✏️ Edit / Activate / Deactivate a School")
+            with st.form("edit_school"):
+                pick = st.selectbox("School", (schools["SchoolName"] + " (" + schools["SchoolID"] + ")").tolist())
+                sid = pick.split("(")[-1].rstrip(")")
+                srow = schools[schools["SchoolID"] == sid].iloc[0]
+                c1, c2 = st.columns(2)
+                name = c1.text_input("School Name", value=str(srow.get("SchoolName", "")))
+                phone = c2.text_input("Phone", value=str(srow.get("Phone", "")))
+                address = st.text_input("Address", value=str(srow.get("Address", "")))
+                c3, c4 = st.columns(2)
+                eiin = c3.text_input("EIIN", value=str(srow.get("SchoolEIIN", "")))
+                status = c4.radio("Status", ["Yes", "No"], index=0 if str(srow.get("IsActive", "Yes")) == "Yes" else 1, horizontal=True)
+                logo_url = st.text_input("Logo URL / base64", value=str(srow.get("Logo", "")))
+                if st.form_submit_button("💾 Save School", type="primary"):
+                    schools.loc[schools["SchoolID"] == sid, ["SchoolName", "Phone", "Address", "SchoolEIIN", "IsActive", "Logo"]] = \
+                        [name, phone, address, eiin, status, logo_url]
+                    upsert_rows("Schools", schools[schools["SchoolID"] == sid], key_cols=["SchoolID"])
+                    st.success("School updated. Deactivated schools can no longer log in.")
+                    st.rerun()
+
     with tab2:
+        st.caption("SuperAdmin can view, reset PIN, and activate/deactivate ANY school's Admin (Headteacher) account.")
+        all_teachers = read_df("Teachers")
+        schools_lu = read_df("Schools").set_index("SchoolID")["SchoolName"].to_dict()
+        admins = all_teachers[all_teachers["Role"].isin([ROLE_ADMIN, "Headmaster", "Headteacher"])] if not all_teachers.empty else pd.DataFrame()
+        if admins.empty:
+            st.info("No school admins found yet.")
+        else:
+            show = admins.copy()
+            show["School"] = show["SchoolID"].map(lambda s: schools_lu.get(s, s))
+            show["PIN"] = show["PIN"].astype(str).apply(lambda p: "••" + p[-2:] if len(p) >= 2 else "••")
+            cols = [c for c in ["School", "TeacherID", "Name", "Role", "Phone", "Email", "IsActive", "PIN"] if c in show.columns]
+            st.dataframe(show[cols], use_container_width=True, hide_index=True)
+
+            with st.expander("🔑 Reset an Admin's PIN"):
+                pick = st.selectbox("Admin", (admins["Name"] + " — " + admins["SchoolID"].map(lambda s: schools_lu.get(s, s)) + " (" + admins["TeacherID"] + ")").tolist())
+                new_pin = st.text_input("New PIN", value=str(np.random.randint(1000, 9999)), key="sa_reset_pin")
+                if st.button("Reset Admin PIN"):
+                    tid = pick.split("(")[-1].rstrip(")")
+                    all_teachers.loc[all_teachers["TeacherID"] == tid, "PIN"] = new_pin
+                    upsert_rows("Teachers", all_teachers[all_teachers["TeacherID"] == tid], key_cols=["TeacherID"])
+                    st.success("Admin PIN reset.")
+
+            with st.expander("🚫 Activate / Deactivate an Admin"):
+                pick2 = st.selectbox("Admin ", (admins["Name"] + " — " + admins["SchoolID"].map(lambda s: schools_lu.get(s, s)) + " (" + admins["TeacherID"] + ")").tolist(), key="sa_deact")
+                new_status = st.radio("Status ", ["Yes", "No"], horizontal=True, key="sa_deact_status")
+                if st.button("Update Admin Status"):
+                    tid2 = pick2.split("(")[-1].rstrip(")")
+                    all_teachers.loc[all_teachers["TeacherID"] == tid2, "IsActive"] = new_status
+                    upsert_rows("Teachers", all_teachers[all_teachers["TeacherID"] == tid2], key_cols=["TeacherID"])
+                    st.success("Admin status updated.")
+
+    with tab3:
         subs = read_df("Subscriptions")
         st.dataframe(subs, use_container_width=True, hide_index=True)
         with st.expander("➕ Add Subscription"):
@@ -1419,7 +1689,7 @@ def page_superadmin():
                     st.success("Subscription added.")
                     st.rerun()
 
-    with tab3:
+    with tab4:
         pays = read_df("PaymentLogs")
         st.dataframe(pays, use_container_width=True, hide_index=True)
         with st.expander("➕ Log a Payment (bKash / Nagad)"):
@@ -1440,14 +1710,320 @@ def page_superadmin():
                     st.rerun()
 
 
+# =============================================================================
+# MY PROFILE — self-service for Teacher/Admin/Clerk/Staff
+#   (নিজের PIN পরিবর্তন করা, নিজের প্রোফাইল edit করা)
+# =============================================================================
+def page_my_profile():
+    school_id = st.session_state["school_id"]
+    teacher_id = st.session_state["teacher_id"]
+    hero("👤 My Profile", "Edit your own details and change your login PIN.")
+
+    teachers = read_df("Teachers", school_id=school_id)
+    mine = teachers[teachers["TeacherID"] == teacher_id]
+    if mine.empty:
+        st.info("Profile record not found.")
+        return
+    me = mine.iloc[0]
+
+    st.markdown("#### ✏️ Edit My Profile")
+    with st.form("edit_my_profile"):
+        c1, c2 = st.columns(2)
+        phone = c1.text_input("Phone", value=str(me.get("Phone", "")))
+        email = c2.text_input("Email", value=str(me.get("Email", "")))
+        address = st.text_input("Address", value=str(me.get("Address", "")))
+        if st.form_submit_button("💾 Save Profile", type="primary"):
+            teachers.loc[teachers["TeacherID"] == teacher_id, "Phone"] = phone
+            teachers.loc[teachers["TeacherID"] == teacher_id, "Email"] = email
+            teachers.loc[teachers["TeacherID"] == teacher_id, "Address"] = address
+            upsert_rows("Teachers", teachers[teachers["TeacherID"] == teacher_id], key_cols=["TeacherID"])
+            st.success("Profile updated.")
+            st.rerun()
+
+    st.markdown("#### 🔑 Change My PIN")
+    with st.form("change_my_pin"):
+        old_pin = st.text_input("Current PIN", type="password")
+        new_pin = st.text_input("New PIN", type="password")
+        confirm_pin = st.text_input("Confirm New PIN", type="password")
+        if st.form_submit_button("Update PIN", type="primary"):
+            if str(me.get("PIN", "")) != old_pin.strip():
+                st.error("Current PIN is incorrect.")
+            elif not new_pin.strip() or new_pin != confirm_pin:
+                st.error("New PIN and Confirm PIN must match and cannot be empty.")
+            else:
+                teachers.loc[teachers["TeacherID"] == teacher_id, "PIN"] = new_pin.strip()
+                upsert_rows("Teachers", teachers[teachers["TeacherID"] == teacher_id], key_cols=["TeacherID"])
+                st.success("PIN updated — use it next time you log in.")
+
+
+# =============================================================================
+# EXAM GUARD LIST / INVIGILATION DUTIES
+#   এক হলে একাধিক টিচার, একেক হলে একেকদিন, নির্দিষ্ট টিচার নির্দিষ্ট ক্লাসে না
+# =============================================================================
+def page_exam_duties():
+    school_id, role, actor = st.session_state["school_id"], st.session_state["role"], st.session_state["user_name"]
+    hero("🛡️ Guard List / Exam Duties", "Assign invigilators per room per exam-day. Private-tutor conflicts are flagged automatically.")
+
+    exams = read_df("Exams", school_id=school_id)
+    routines = read_df("Routines", school_id=school_id)
+    teachers = read_df("Teachers", school_id=school_id)
+    if exams.empty or teachers.empty:
+        st.info("Add Exams and Teachers first.")
+        return
+    teacher_lookup = teachers.set_index("TeacherID")["Name"].to_dict()
+
+    exam_label = st.selectbox("Exam", (exams["ExamName"] + " (" + exams["ExamID"] + ")").tolist())
+    exam_id = exam_label.split("(")[-1].rstrip(")")
+    exam_name = exams[exams["ExamID"] == exam_id].iloc[0]["ExamName"]
+    day_routines = routines[routines["ExamID"] == exam_id] if not routines.empty else pd.DataFrame()
+    day_options = sorted(day_routines["ExamDate"].dropna().unique().tolist()) if not day_routines.empty else []
+
+    if role in ADMIN_LIKE_ROLES:
+        with st.expander("➕ Assign / Update a Room's Duty", expanded=True):
+            with st.form("add_duty"):
+                c1, c2 = st.columns(2)
+                exam_date = c1.selectbox("Exam Date (from Routine)", day_options) if day_options else c1.text_input("Exam Date (YYYY-MM-DD)")
+                room_no = c2.text_input("Room No.")
+                assigned_classes = st.text_input("Assigned Class(es) for this room")
+                teacher_names = (teachers["Name"] + " (" + teachers["TeacherID"] + ")").tolist()
+                invigilators = st.multiselect("Invigilator(s) — one room can have more than one", teacher_names)
+                excluded = st.multiselect(
+                    "Teachers who must NOT be assigned here (their own private students sit in this room)",
+                    teacher_names,
+                )
+                notes = st.text_input("Notes")
+                if st.form_submit_button("Save Duty", type="primary"):
+                    inv_ids = [t.split("(")[-1].rstrip(")") for t in invigilators][:3]
+                    excl_ids = [t.split("(")[-1].rstrip(")") for t in excluded]
+                    conflict = set(inv_ids) & set(excl_ids)
+                    if conflict:
+                        st.error("A teacher can't be both an invigilator and excluded for the same room. Fix the overlap.")
+                    else:
+                        # Conflict check: same teacher, same exam date, different room already assigned.
+                        existing_duties = read_df("ExamDuties", school_id=school_id)
+                        clash = []
+                        if not existing_duties.empty:
+                            same_day = existing_duties[
+                                (existing_duties["ExamID"] == exam_id) & (existing_duties.get("ExamDate", "") == exam_date)
+                                if "ExamDate" in existing_duties.columns else existing_duties["ExamID"] == exam_id
+                            ]
+                            for _, row_ in same_day.iterrows():
+                                if row_.get("RoomNo") == room_no:
+                                    continue
+                                for c in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"]:
+                                    if row_.get(c) in inv_ids:
+                                        clash.append(teacher_lookup.get(row_.get(c), row_.get(c)))
+                        if clash:
+                            st.warning(f"⚠️ Already assigned to another room the same day: {', '.join(set(clash))}. Saved anyway — please review.")
+                        did = next_seq_id(school_id, "ExamDuties", "DutyID", "DUTY")
+                        row = {
+                            "SchoolID": school_id, "DutyID": did, "ExamID": exam_id, "ExamDate": exam_date,
+                            "Shift": "", "RoomNo": room_no, "AssignedClasses": assigned_classes,
+                            "TotalScriptsNeeded": "", "Invigilator1_ID": inv_ids[0] if len(inv_ids) > 0 else "",
+                            "Invigilator2_ID": inv_ids[1] if len(inv_ids) > 1 else "",
+                            "Invigilator3_ID": inv_ids[2] if len(inv_ids) > 2 else "",
+                            "PrivateTutorTeacherIDs": ",".join(excl_ids), "Status": "Assigned", "Notes": notes,
+                        }
+                        append_row("ExamDuties", row)
+                        st.success("Duty saved.")
+                        st.rerun()
+
+    duties = read_df("ExamDuties", school_id=school_id)
+    duties = duties[duties["ExamID"] == exam_id] if not duties.empty else duties
+    if duties is not None and not duties.empty:
+        show = duties.copy()
+        for c in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"]:
+            show[c] = show[c].map(lambda t: teacher_lookup.get(t, t))
+        cols = [c for c in ["RoomNo", "AssignedClasses", "ExamDate", "Invigilator1_ID",
+                             "Invigilator2_ID", "Invigilator3_ID", "PrivateTutorTeacherIDs", "Status"] if c in show.columns]
+        st.dataframe(show[cols], use_container_width=True, hide_index=True)
+        html = render_guard_list(
+            read_df("Schools")[read_df("Schools")["SchoolID"] == school_id].iloc[0], exam_name, duties, teacher_lookup
+        )
+        st.markdown(html, unsafe_allow_html=True)
+        print_button()
+    else:
+        st.info("No duties assigned yet for this exam.")
+
+
+# =============================================================================
+# SEAT PLAN (auto bench allocation, per exam / room)
+# =============================================================================
+def page_seatplan():
+    school_id, role, actor = st.session_state["school_id"], st.session_state["role"], st.session_state["user_name"]
+    hero("🪑 Seat Plan", "Auto-generate exam bench/seat allocation by roll number.")
+
+    exams = read_df("Exams", school_id=school_id)
+    students, classes = _class_section_options(school_id)
+    if exams.empty or not classes:
+        st.info("Add Exams and Students first.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    exam_label = c1.selectbox("Exam", (exams["ExamName"] + " (" + exams["ExamID"] + ")").tolist())
+    exam_id = exam_label.split("(")[-1].rstrip(")")
+    exam_name = exams[exams["ExamID"] == exam_id].iloc[0]["ExamName"]
+    klass = c2.selectbox("Class", classes)
+    sections = sorted(students[students["Class"] == klass]["Section"].dropna().unique().tolist())
+    section = c3.selectbox("Section", sections if sections else ["A"])
+    room_no = c4.text_input("Room No.", value="1")
+    capacity = st.number_input("Benches per row / seats used for numbering", min_value=1, value=2)
+
+    if role in ADMIN_LIKE_ROLES and st.button("⚙️ Auto-Generate Seat Plan", type="primary"):
+        cs = students[(students["Class"] == klass) & (students["Section"] == section)
+                      & (students.get("Status", "Active") == "Active")].copy()
+        cs = cs.sort_values("Roll", key=lambda s: pd.to_numeric(s, errors="coerce")).reset_index(drop=True)
+        rows = []
+        for i, r in cs.iterrows():
+            bench_no = (i // int(capacity)) + 1
+            seat_pos = "Left" if i % int(capacity) == 0 else "Right"
+            rows.append({
+                "SchoolID": school_id, "SeatPlanID": next_seq_id(school_id, "SeatPlans_Attendance", "SeatPlanID", "SEAT"),
+                "ExamID": exam_id, "RoomNo": room_no, "StudentID": r["StudentID"], "Class": klass,
+                "Section": section, "Roll": r["Roll"], "Gender": r.get("Gender", ""),
+                "BenchNo": bench_no, "SeatPosition": seat_pos, "ExamDate": "", "IsPresent": "", "AttendanceRemarks": "",
+            })
+        df = pd.DataFrame(rows)
+        for _, row in df.iterrows():
+            append_row("SeatPlans_Attendance", row.to_dict())
+        st.session_state["_last_seatplan"] = df
+        st.success(f"Generated seats for {len(df)} students in Room {room_no}.")
+
+    plan = st.session_state.get("_last_seatplan")
+    if plan is None:
+        all_plans = read_df("SeatPlans_Attendance", school_id=school_id)
+        plan = all_plans[(all_plans["ExamID"] == exam_id) & (all_plans["RoomNo"] == room_no)] if not all_plans.empty else pd.DataFrame()
+    if plan is not None and not plan.empty:
+        st.dataframe(plan, use_container_width=True, hide_index=True)
+        schools = read_df("Schools")
+        school_row = schools[schools["SchoolID"] == school_id].iloc[0] if not schools.empty else pd.Series()
+        st.markdown(render_seat_plan(school_row, exam_name, room_no, plan), unsafe_allow_html=True)
+        print_button()
+    else:
+        st.info("No seat plan generated yet for this Exam / Room.")
+
+
+# =============================================================================
+# SCRIPT (ANSWER-SHEET) HANDOVER / RETURN REGISTER — খাতা জমা-নেওয়া
+# =============================================================================
+def page_script_distribution():
+    school_id, role, actor = st.session_state["school_id"], st.session_state["role"], st.session_state["user_name"]
+    hero("📒 Script Register", "Log answer-script handover to teachers and their return.")
+
+    exams = read_df("Exams", school_id=school_id)
+    subjects = read_df("Subjects", school_id=school_id)
+    teachers = read_df("Teachers", school_id=school_id)
+    if exams.empty or teachers.empty:
+        st.info("Add Exams and Teachers first.")
+        return
+    subject_lookup = subjects.set_index("SubjectID")["SubjectName"].to_dict() if not subjects.empty else {}
+
+    exam_label = st.selectbox("Exam", (exams["ExamName"] + " (" + exams["ExamID"] + ")").tolist())
+    exam_id = exam_label.split("(")[-1].rstrip(")")
+    exam_name = exams[exams["ExamID"] == exam_id].iloc[0]["ExamName"]
+
+    with st.expander("➕ Hand Over Scripts to a Teacher", expanded=True):
+        with st.form("handover_scripts"):
+            c1, c2, c3 = st.columns(3)
+            subj_label = c1.selectbox("Subject", (subjects["SubjectName"] + " (" + subjects["SubjectID"] + ")").tolist()) if not subjects.empty else None
+            klass = c2.text_input("Class")
+            section = c3.text_input("Section")
+            teacher_label = st.selectbox("Teacher", (teachers["Name"] + " (" + teachers["TeacherID"] + ")").tolist())
+            count = st.number_input("Total Scripts Handed Over", min_value=0, step=1)
+            if st.form_submit_button("Save Handover", type="primary") and subj_label:
+                subject_id = subj_label.split("(")[-1].rstrip(")")
+                tid = teacher_label.split("(")[-1].rstrip(")")
+                did = next_seq_id(school_id, "ScriptDistribution", "DistributionID", "SCR")
+                append_row("ScriptDistribution", {
+                    "SchoolID": school_id, "DistributionID": did, "ExamID": exam_id, "SubjectID": subject_id,
+                    "Class": klass, "Section": section, "TeacherID": tid, "TotalScriptsHandedOver": count,
+                    "HandoverDate": datetime.now().strftime("%Y-%m-%d"), "ReturnStatus": "Pending",
+                })
+                st.success("Handover logged.")
+                st.rerun()
+
+    dist = read_df("ScriptDistribution", school_id=school_id)
+    dist = dist[dist["ExamID"] == exam_id] if not dist.empty else dist
+    if dist is not None and not dist.empty:
+        pending = dist[dist["ReturnStatus"] != "Returned"]
+        if not pending.empty:
+            with st.expander("↩️ Mark Scripts as Returned"):
+                labels = (pending["DistributionID"] + " — " + pending["TeacherID"] + " — " + pending["SubjectID"]).tolist()
+                pick = st.selectbox("Pick a handover record", labels)
+                dist_id = pick.split(" — ")[0]
+                returned_count = st.number_input("Returned Scripts Count", min_value=0, step=1)
+                if st.button("Mark Returned"):
+                    dist.loc[dist["DistributionID"] == dist_id, "ReturnedScriptsCount"] = returned_count
+                    dist.loc[dist["DistributionID"] == dist_id, "ReturnDate"] = datetime.now().strftime("%Y-%m-%d")
+                    dist.loc[dist["DistributionID"] == dist_id, "ReturnStatus"] = "Returned"
+                    upsert_rows("ScriptDistribution", dist[dist["DistributionID"] == dist_id], key_cols=["DistributionID"])
+                    st.success("Marked returned.")
+                    st.rerun()
+        st.dataframe(dist, use_container_width=True, hide_index=True)
+        schools = read_df("Schools")
+        school_row = schools[schools["SchoolID"] == school_id].iloc[0] if not schools.empty else pd.Series()
+        st.markdown(render_script_sheet(school_row, exam_name, dist, subject_lookup), unsafe_allow_html=True)
+        print_button()
+    else:
+        st.info("No script handovers logged yet for this exam.")
+
+
+# =============================================================================
+# CERTIFICATES — প্রত্যয়নপত্র / প্রশংসাপত্র / ছাড়পত্র (auto-generated)
+# =============================================================================
+def page_certificates():
+    school_id = st.session_state["school_id"]
+    hero("📜 Certificates", "Auto-generate Testimonial, Transfer Certificate & Certification letters.")
+
+    schools = read_df("Schools")
+    school_row = schools[schools["SchoolID"] == school_id].iloc[0] if not schools.empty else pd.Series()
+    students, classes = _class_section_options(school_id)
+    if not classes:
+        st.info("Add Students first.")
+        return
+
+    c1, c2 = st.columns(2)
+    klass = c1.selectbox("Class", classes)
+    cs = students[students["Class"] == klass]
+    student_label = c2.selectbox(
+        "Student", (cs["StudentName"] + " — Roll " + cs["Roll"] + " (" + cs["StudentID"] + ")").tolist()
+    ) if not cs.empty else None
+    cert_type = st.radio(
+        "Certificate Type",
+        ["testimonial", "transfer", "certification"],
+        format_func=lambda k: {"testimonial": "প্রশংসাপত্র (Testimonial)", "transfer": "ছাড়পত্র (Transfer Certificate)",
+                                "certification": "প্রত্যয়নপত্র (Certification)"}[k],
+        horizontal=True,
+    )
+    extra = {}
+    if cert_type == "transfer":
+        c3, c4 = st.columns(2)
+        extra["reason"] = c3.text_input("Reason for leaving (optional — overrides Students sheet)")
+        extra["character"] = c4.text_input("Character remark", value="Good")
+        extra["dues"] = st.text_input("Dues status", value="cleared")
+    elif cert_type == "certification":
+        extra["purpose_line"] = st.text_input(
+            "Purpose line", value="This certificate is issued on the student/guardian's request for necessary purposes."
+        )
+    else:
+        extra["character"] = st.text_input("Character remark", value="good and satisfactory")
+
+    if student_label and st.button("🖨️ Generate Certificate", type="primary"):
+        sid = student_label.split("(")[-1].rstrip(")")
+        student_row = cs[cs["StudentID"] == sid].iloc[0]
+        html = render_certificate(school_row, student_row, cert_type, extra)
+        st.markdown(html, unsafe_allow_html=True)
+        print_button()
+
+
 GENERIC_SHEETS = {
     "Job Applications": ("JobApplications", "JobAppID"),
     "Admission Applications": ("Applications", "AppID"),
-    "Seat Plans / Attendance": ("SeatPlans_Attendance", "SeatPlanID"),
-    "Exam Duties": ("ExamDuties", "DutyID"),
-    "Script Distribution": ("ScriptDistribution", "DistributionID"),
     "Contact Messages": ("ContactMessages", "MessageID"),
 }
+# Note: Seat Plans, Exam Duties (Guard List) and Script Distribution now have
+# their own dedicated, rule-aware pages (see page_seatplan / page_exam_duties /
+# page_script_distribution below) instead of the raw generic editor.
 
 
 def page_other_records():
@@ -1519,14 +2095,23 @@ NAV_BY_ROLE = {
     ROLE_ADMIN: [
         ("🏠 Dashboard", "dashboard"), ("📝 Marks Entry", "marks"),
         ("📊 Generate & Publish Results", "results"), ("🏆 Consolidated & Promotion", "consolidated"),
-        ("🖨️ Print Center", "print"), ("🎒 Students", "students"), ("👩‍🏫 Teachers", "teachers"),
-        ("🗓️ Routines", "routines"), ("📢 Notices", "notices"), ("🗂️ Other Records", "other"),
+        ("🖨️ Print Center", "print"), ("📜 Certificates", "certificates"),
+        ("🎒 Students", "students"), ("👩‍🏫 Teachers", "teachers"),
+        ("🗓️ Routines", "routines"), ("🛡️ Guard List / Duties", "duties"),
+        ("🪑 Seat Plan", "seatplan"), ("📒 Script Register", "scripts"),
+        ("📢 Notices", "notices"), ("🗂️ Other Records", "other"), ("👤 My Profile", "profile"),
     ],
     ROLE_TEACHER: [
         ("🏠 Dashboard", "dashboard"), ("📝 Marks Entry", "marks"),
-        ("🖨️ Print Center", "print"), ("🗓️ Routines", "routines"), ("📢 Notices", "notices"),
+        ("🖨️ Print Center", "print"), ("🗓️ Routines", "routines"),
+        ("🛡️ Guard List / Duties", "duties"), ("📢 Notices", "notices"),
+        ("🎒 Students", "students"), ("👤 My Profile", "profile"),
     ],
-    ROLE_CLERK: [("🏠 Dashboard", "dashboard"), ("📢 Notices", "notices"), ("🗓️ Routines", "routines")],
+    ROLE_CLERK: [("🏠 Dashboard", "dashboard"), ("📢 Notices", "notices"), ("👤 My Profile", "profile")],
+    # Blank-Role staff: view-only limited access, per spec ("তাদের কোনো role
+    # থাকবে না" -> সীমিত তথ্য দেখতে পারবে)।
+    ROLE_STAFF: [("🏠 Dashboard", "dashboard"), ("🗓️ Routines", "routines"),
+                 ("📢 Notices", "notices"), ("👤 My Profile", "profile")],
 }
 # Headteacher/Headmaster get the same menu as Admin
 NAV_BY_ROLE["Headmaster"] = NAV_BY_ROLE[ROLE_ADMIN]
@@ -1537,6 +2122,8 @@ PAGE_FUNCS = {
     "consolidated": page_consolidated, "print": page_print_center, "students": page_students,
     "teachers": page_teachers, "routines": page_routines, "notices": page_notices,
     "other": page_other_records, "superadmin": page_superadmin,
+    "duties": page_exam_duties, "seatplan": page_seatplan, "scripts": page_script_distribution,
+    "certificates": page_certificates, "profile": page_my_profile,
 }
 
 
@@ -1545,9 +2132,9 @@ def sidebar_nav():
     with st.sidebar:
         st.markdown(f"### 🎓 School Manager BD")
         st.caption(f"{st.session_state['school_name']}")
-        st.markdown(f"**{st.session_state['user_name']}**  \n`{role}`")
+        st.markdown(f"**{st.session_state['user_name']}**  \n`{role or 'Staff'}`")
         st.markdown("---")
-        items = NAV_BY_ROLE.get(role, NAV_BY_ROLE[ROLE_TEACHER])
+        items = NAV_BY_ROLE.get(role, NAV_BY_ROLE[ROLE_STAFF])
         if "nav" not in st.session_state:
             st.session_state["nav"] = items[0][1]
         for label, key in items:
