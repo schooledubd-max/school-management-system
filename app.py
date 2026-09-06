@@ -48,7 +48,7 @@ live HTTPS URL with PWABuilder.com or Median.co to publish on Play Store.
 import time
 import uuid
 import base64
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -293,6 +293,22 @@ def hint(text: str):
 def hero(title: str, subtitle: str = ""):
     st.markdown(
         f"""<div class="em-hero"><h1>🎓 {title}</h1><p>{subtitle}</p></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def admob_placeholder(slot: str = "banner"):
+    """Google AdMob monetization PLACEHOLDER. This is a Streamlit web app, so
+    a real AdMob SDK banner can't render here directly — but when this app
+    is wrapped with Capacitor/Median/PWABuilder into an Android APK for the
+    Play Store, replace this placeholder <div> with the native AdMob banner
+    view (its id is kept stable as 'admob-banner-slot' for that purpose)."""
+    if str(st.secrets.get("ADMOB_ENABLED", "")).lower() not in ("1", "true", "yes"):
+        return
+    st.markdown(
+        f"""<div id="admob-{slot}-slot" style="margin:14px 0;padding:10px;text-align:center;
+             border:1px dashed #94a3b8;border-radius:8px;color:#94a3b8;font-size:0.78rem;
+             background:#f8fafc;">📢 Ad Space ({slot}) — Play Store APK-এ এখানে আসল AdMob ব্যানার বসবে</div>""",
         unsafe_allow_html=True,
     )
 
@@ -548,8 +564,68 @@ def next_seq_id(school_id: str, sheet_name: str, id_col: str, prefix: str, width
 
 
 # =============================================================================
-# CLASS ORDER (for promotion) & GRADING ENGINE
+# SUBSCRIPTION LOCK & PAYMENT APPROVAL
+#   স্কুলের সাবস্ক্রিপশন মেয়াদ শেষ হলে Admin/Teacher ফিচার লক হয়ে শুধু
+#   Billing পেজ (রিনিউ + বিকাশ/নগদ পেমেন্ট) দেখাবে, SuperAdmin অনুমোদন
+#   করলেই আবার আনলক হবে।
 # =============================================================================
+def get_subscription_status(school_id: str):
+    """Returns (is_locked: bool, latest_sub_row_or_None, human_message: str).
+    A school with NO subscription rows at all is treated as unlocked (grace
+    period) so existing/older schools never get accidentally locked out."""
+    subs = read_df("Subscriptions", school_id=school_id)
+    if subs.empty:
+        return False, None, "কোনো সাবস্ক্রিপশন রেকর্ড এখনো তৈরি হয়নি (Grace period — আনলকড)।"
+    subs = subs.copy()
+    subs["_exp"] = pd.to_datetime(subs.get("ExpiryDate", ""), errors="coerce")
+    subs = subs.sort_values("_exp", ascending=False)
+    latest = subs.iloc[0]
+    if pd.isna(latest["_exp"]):
+        return False, latest, "মেয়াদের তারিখ পাওয়া যায়নি — আনলকড ধরা হচ্ছে।"
+    today = pd.Timestamp(datetime.now().date())
+    if str(latest.get("Status", "")) == "Active" and latest["_exp"].date() >= today.date():
+        return False, latest, f"সক্রিয় সাবস্ক্রিপশন — মেয়াদ শেষ হবে {latest.get('ExpiryDate','')} তারিখে।"
+    if latest["_exp"].date() < today.date():
+        return True, latest, f"সাবস্ক্রিপশনের মেয়াদ {latest.get('ExpiryDate','')} তারিখে শেষ হয়ে গেছে।"
+    return False, latest, f"সক্রিয় — মেয়াদ শেষ হবে {latest.get('ExpiryDate','')} তারিখে।"
+
+
+def approve_payment(payment_row: pd.Series):
+    """SuperAdmin approves a Pending bKash/Nagad/Rocket claim: marks the
+    payment SUCCESS and extends (or creates) that school's subscription."""
+    school_id = payment_row.get("SchoolID", "")
+    plan_days = {"Monthly": 30, "Yearly": 365, "Trial": 15}
+    pays = read_df("PaymentLogs")
+    pays.loc[pays["PaymentID"] == payment_row.get("PaymentID"), "Status"] = "SUCCESS"
+    upsert_rows("PaymentLogs", pays[pays["PaymentID"] == payment_row.get("PaymentID")], key_cols=["PaymentID"])
+
+    subs = read_df("Subscriptions", school_id=school_id)
+    today = datetime.now().date()
+    if not subs.empty:
+        subs = subs.copy()
+        subs["_exp"] = pd.to_datetime(subs.get("ExpiryDate", ""), errors="coerce")
+        latest = subs.sort_values("_exp", ascending=False).iloc[0]
+        base_date = latest["_exp"].date() if pd.notna(latest["_exp"]) and latest["_exp"].date() > today else today
+        plan = str(latest.get("PlanType", "Monthly")) or "Monthly"
+        new_expiry = base_date + timedelta(days=plan_days.get(plan, 30))
+        subs_all = read_df("Subscriptions")
+        subs_all.loc[subs_all["SubscriptionID"] == latest["SubscriptionID"], ["ExpiryDate", "Status", "LastPaymentDate"]] = [
+            new_expiry.strftime("%Y-%m-%d"), "Active", today.strftime("%Y-%m-%d"),
+        ]
+        upsert_rows("Subscriptions", subs_all[subs_all["SubscriptionID"] == latest["SubscriptionID"]], key_cols=["SubscriptionID"])
+    else:
+        new_expiry = today + timedelta(days=30)
+        subid = f"{school_id.replace('SCH-','')}-{datetime.now().strftime('%y')}-SUBS001"
+        append_row("Subscriptions", {
+            "SchoolID": school_id, "SubscriptionID": subid, "PlanType": "Monthly",
+            "Amount": payment_row.get("Amount", ""), "StartDate": today.strftime("%Y-%m-%d"),
+            "ExpiryDate": new_expiry.strftime("%Y-%m-%d"), "Status": "Active",
+            "LastPaymentDate": today.strftime("%Y-%m-%d"),
+        })
+    return new_expiry
+
+
+
 def get_class_order(school_id: str) -> list:
     cc = read_df("ClassCategory", school_id=school_id)
     if not cc.empty and "Class" in cc.columns:
@@ -1051,7 +1127,9 @@ def render_marksheet(school_row, student_row, result_row, marks_df, subjects_df,
 
 def render_admit_card(school_row, student_row, exam_name, routine_df):
     """One admit card, WITH its exam routine printed on the same card (so the
-    admit card and routine are always together on paper, as required)."""
+    admit card and routine are always together on paper). Styled like a
+    real admit card: photo box, colored ADMIT CARD ribbon, subject-wise
+    schedule table and three signature lines."""
     sched_rows = ""
     for _, r in routine_df.sort_values("ExamDate").iterrows() if not routine_df.empty else []:
         sched_rows += (
@@ -1059,16 +1137,30 @@ def render_admit_card(school_row, student_row, exam_name, routine_df):
             f"<td>{r.get('StartTime','')} - {r.get('EndTime','')}</td>"
             f"<td>{r.get('SubjectID','')}</td><td>{r.get('Classes', r.get('RoomID',''))}</td></tr>"
         )
+    photo = str(student_row.get("Photo", "") or "").strip()
+    photo_html = (
+        f'<img src="{photo}" style="width:80px;height:96px;object-fit:cover;border:1px solid #94a3b8;" />'
+        if photo else
+        '<div style="width:80px;height:96px;border:1px dashed #94a3b8;display:flex;align-items:center;'
+        'justify-content:center;font-size:0.65rem;color:#94a3b8;text-align:center;">Photo</div>'
+    )
     html = f"""
-    <div class="marksheet" style="max-width:100%;">
-        {doc_header(school_row, f"Admit Card — {exam_name}")}
-        <table style="width:100%;margin-top:10px;">
-            <tr><td><b>Name:</b> {student_row.get('StudentName','')}</td><td><b>ID:</b> {student_row.get('StudentID','')}</td></tr>
-            <tr><td><b>Class:</b> {student_row.get('Class','')}</td><td><b>Section:</b> {student_row.get('Section','')}</td></tr>
-            <tr><td><b>Roll:</b> {student_row.get('Roll','')}</td><td><b>Session:</b> {student_row.get('Session','')}</td></tr>
-        </table>
-        <table class="ms-table"><tr><th>Date</th><th>Day</th><th>Time</th><th>Subject</th><th>Room</th></tr>{sched_rows}</table>
-        <div style="display:flex;justify-content:space-between;margin-top:40px;">
+    <div class="marksheet" style="max-width:100%;padding:16px 20px;position:relative;">
+        <div style="background:linear-gradient(90deg,#1e3a8a,#2563eb);color:white;text-align:center;
+                    padding:4px;border-radius:6px;font-weight:800;letter-spacing:2px;margin-bottom:8px;">
+            ADMIT CARD &nbsp;•&nbsp; প্রবেশপত্র
+        </div>
+        {doc_header(school_row, exam_name)}
+        <div style="display:flex;justify-content:space-between;gap:14px;margin-top:8px;">
+            <table style="width:100%;">
+                <tr><td><b>Name:</b> {student_row.get('StudentName','')}</td><td><b>ID:</b> {student_row.get('StudentID','')}</td></tr>
+                <tr><td><b>Class:</b> {student_row.get('Class','')}</td><td><b>Section:</b> {student_row.get('Section','')}</td></tr>
+                <tr><td><b>Roll:</b> {student_row.get('Roll','')}</td><td><b>Session:</b> {student_row.get('Session','')}</td></tr>
+            </table>
+            {photo_html}
+        </div>
+        <table class="ms-table" style="margin-top:10px;"><tr><th>Date</th><th>Day</th><th>Time</th><th>Subject</th><th>Room</th></tr>{sched_rows}</table>
+        <div style="display:flex;justify-content:space-between;margin-top:30px;font-size:0.85rem;">
             <div>_____________________<br/>Student Signature</div>
             <div>_____________________<br/>Class Teacher</div>
             <div>_____________________<br/>Headteacher</div>
@@ -1090,6 +1182,65 @@ def render_admit_cards_2up(school_row, cards: list):
             f'min-height:48vh;">{cells}</div>'
         )
     return pages
+
+
+def render_two_copies_stacked(single_html: str) -> str:
+    """Generic 'একই পাতায় ২ কপি' helper: stacks the same printed document
+    twice on one A4 sheet with a dashed cut-line between them — used for the
+    exam routine (as required) and reusable for any other single-page doc."""
+    return f"""
+    <div style="border-bottom:2px dashed #94a3b8;padding-bottom:16px;margin-bottom:16px;">{single_html}</div>
+    <div>{single_html}</div>
+    """
+
+
+def render_routine_grid(school_row, title: str, subtitle: str, routine_df: pd.DataFrame) -> str:
+    """Board-style exam routine grid — Date/Day rows down the side, Time-Shift
+    groups across the top, Class-Group sub-columns under each shift, and the
+    subject/label in each cell — matching the reference routine design."""
+    if routine_df.empty:
+        return f"""<div class="marksheet">{doc_header(school_row, title, subtitle)}
+                    <p style='text-align:center;color:#64748b;'>এখনো কোনো রুটিন এন্ট্রি নেই।</p></div>"""
+
+    shifts = (
+        routine_df[["StartTime", "EndTime"]].drop_duplicates()
+        .sort_values("StartTime").itertuples(index=False)
+    )
+    shift_list = list(shifts)
+    class_groups = list(dict.fromkeys([c for c in routine_df["ClassGroup"].tolist() if str(c).strip()]))
+    if not class_groups:
+        class_groups = ["সকল ক্লাস"]
+    dates = (
+        routine_df[["ExamDate", "DayName"]].drop_duplicates()
+        .sort_values("ExamDate").itertuples(index=False)
+    )
+
+    header_top = "<tr><th rowspan='2'>তারিখ</th><th rowspan='2'>বার</th>"
+    for st_, et_ in shift_list:
+        header_top += f"<th colspan='{len(class_groups)}'>সময়: {st_} - {et_}</th>"
+    header_top += "</tr>"
+    header_bottom = "<tr>" + "".join(f"<th>{cg}</th>" for _ in shift_list for cg in class_groups) + "</tr>"
+
+    body = ""
+    for date_, day_ in dates:
+        body += f"<tr><td><b>{date_}</b></td><td>{day_}</td>"
+        for st_, et_ in shift_list:
+            for cg in class_groups:
+                match = routine_df[
+                    (routine_df["ExamDate"] == date_) & (routine_df["StartTime"] == st_)
+                    & (routine_df["EndTime"] == et_) & (routine_df["ClassGroup"] == cg)
+                ]
+                label = match.iloc[0].get("SubjectID", "") if not match.empty else ""
+                body += f"<td style='text-align:center;'>{label or '&nbsp;'}</td>"
+        body += "</tr>"
+
+    table = f"<table class='ms-table' style='margin-top:12px;'>{header_top}{header_bottom}{body}</table>"
+    return f"""
+    <div class="marksheet" style="max-width:100%;">
+        {doc_header(school_row, title, subtitle)}
+        {table}
+    </div>
+    """
 
 
 def render_certificate(school_row, student_row, cert_type: str, extra: dict = None):
@@ -1155,27 +1306,53 @@ def render_certificate(school_row, student_row, cert_type: str, extra: dict = No
     return html
 
 
-def render_guard_list(school_row, exam_name, duty_rows: pd.DataFrame, teacher_lookup: dict):
-    body = ""
-    for _, d in duty_rows.iterrows():
-        invigilators = ", ".join(
-            teacher_lookup.get(d.get(c, ""), d.get(c, ""))
-            for c in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"] if d.get(c, "")
-        )
-        body += (
-            f"<tr><td>{d.get('RoomNo','')}</td><td>{d.get('AssignedClasses','')}</td>"
-            f"<td>{invigilators}</td><td>{d.get('Status','')}</td><td>{d.get('Notes','')}</td></tr>"
-        )
-    html = f"""
-    <div class="marksheet">
-        {doc_header(school_row, f"Exam Guard / Duty List — {exam_name}")}
-        <table class="ms-table">
-            <tr><th>Room</th><th>Class(es)</th><th>Invigilator(s)</th><th>Status</th><th>Notes</th></tr>
+def render_guard_list(school_row, exam_date: str, class_scope: str, duty_rows: pd.DataFrame, teacher_lookup: dict):
+    """Matches the reference 'DAILY INVIGILATION DUTY & ANSWER SCRIPT
+    DISTRIBUTION CHART' design: grouped by Shift, with SL / Room / Assigned
+    Classes & Students / Total Scripts Needed / Invigilator Name / Signature."""
+    shifts = list(dict.fromkeys(duty_rows["Shift"].tolist())) if not duty_rows.empty else []
+    shift_blocks = ""
+    for shift_label in shifts:
+        rows_in_shift = duty_rows[duty_rows["Shift"] == shift_label].reset_index(drop=True)
+        body = ""
+        for i, d in rows_in_shift.iterrows():
+            names = []
+            for c in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"]:
+                tid = d.get(c, "")
+                if tid:
+                    names.append(teacher_lookup.get(tid, tid))
+            inv_html = "<br>".join(f"{n_i+1}. {nm}" for n_i, nm in enumerate(names)) or "—"
+            classes_html = str(d.get("AssignedClasses", "")).replace("\n", "<br>")
+            body += (
+                f"<tr><td style='text-align:center;'>{i+1}</td>"
+                f"<td>{d.get('RoomNo','')}</td>"
+                f"<td>{classes_html}</td>"
+                f"<td style='text-align:center;'>{d.get('TotalScriptsNeeded','')}</td>"
+                f"<td>{inv_html}</td>"
+                f"<td style='min-width:90px;'>&nbsp;</td></tr>"
+            )
+        shift_blocks += f"""
+        <div style="background:#1e3a8a;color:white;font-weight:800;padding:7px 12px;
+                    margin-top:16px;border-radius:4px 4px 0 0;">{shift_label}</div>
+        <table class="ms-table" style="margin-top:0;">
+            <tr><th>SL</th><th>Room No</th><th>Assigned Classes &amp; Students</th>
+                <th>Total Scripts Needed</th><th>Invigilator Name</th><th>Signature</th></tr>
             {body}
         </table>
-        <div style="display:flex;justify-content:space-between;margin-top:50px;">
-            <div>_____________________<br/>Prepared By</div>
-            <div>_____________________<br/>Headteacher</div>
+        """
+    if not shifts:
+        shift_blocks = "<p style='text-align:center;color:#64748b;'>No duties assigned yet.</p>"
+
+    html = f"""
+    <div class="marksheet" style="max-width:100%;">
+        {doc_header(school_row, "DAILY INVIGILATION DUTY &amp; ANSWER SCRIPT DISTRIBUTION CHART",
+                    f"Exam Date: {exam_date} &nbsp;|&nbsp; {class_scope}")}
+        {shift_blocks}
+        <p style="font-size:0.75rem;color:#64748b;margin-top:10px;">
+            *Total Scripts Needed = Total Students in that room. Teachers must collect exact script count before entering.
+        </p>
+        <div style="display:flex;justify-content:flex-end;margin-top:40px;">
+            <div>_____________________<br/>Headteacher Signature</div>
         </div>
     </div>
     """
@@ -1260,6 +1437,7 @@ def page_dashboard():
             st.dataframe(pays.tail(10) if not pays.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
         st.markdown("### Recent Schools")
         st.dataframe(schools, use_container_width=True, hide_index=True)
+        admob_placeholder("dashboard-superadmin")
         return
 
     students = read_df("Students", school_id=school_id)
@@ -1311,6 +1489,7 @@ def page_dashboard():
             )
     else:
         st.info("No notices yet.")
+    admob_placeholder("dashboard")
 
 
 def _class_section_options(school_id):
@@ -1600,23 +1779,44 @@ def page_print_center():
         if exams2.empty or not classes2:
             st.info("Need Exams and Students data.")
         else:
+            hint("একজনের এডমিট কার্ড দেখতে নিচে Student বেছে নিন। পুরো ক্লাসের সবার এডমিট কার্ড একসাথে "
+                 "(প্রতি A4 পাতায় ২ জন করে, কাটার জন্য মাঝে ডট-লাইনসহ) ছাপাতে নিচের 'Bulk Print' অপশন ব্যবহার করুন।")
+            mode = st.radio("মোড", ["👤 একজন ছাত্রের Admit Card", "👥 পুরো ক্লাসের Admit Card (২ জন/পাতা)"], horizontal=True)
             c1, c2 = st.columns(2)
             exam_label2 = c1.selectbox("Exam", (exams2["ExamName"] + " (" + exams2["ExamID"] + ")").tolist(), key="ac_exam")
             exam_id2 = exam_label2.split("(")[-1].rstrip(")")
             klass2 = c2.selectbox("Class", classes2, key="ac_class")
             cs2 = students2[students2["Class"] == klass2]
-            student_label2 = st.selectbox(
-                "Student", (cs2["StudentName"] + " — Roll " + cs2["Roll"] + " (" + cs2["StudentID"] + ")").tolist(), key="ac_student"
-            ) if not cs2.empty else None
-            if student_label2:
-                sid2 = student_label2.split("(")[-1].rstrip(")")
-                srow2 = cs2[cs2["StudentID"] == sid2].iloc[0]
-                routines = read_df("Routines", school_id=school_id)
-                routines = routines[routines["ExamID"] == exam_id2]
-                exam_name2 = exams2[exams2["ExamID"] == exam_id2].iloc[0]["ExamName"]
-                html2 = render_admit_card(school_row, srow2, exam_name2, routines)
-                st.markdown(html2, unsafe_allow_html=True)
-                print_button()
+            exam_name2 = exams2[exams2["ExamID"] == exam_id2].iloc[0]["ExamName"]
+            routines_all = read_df("Routines", school_id=school_id)
+            routines_all = routines_all[routines_all["ExamID"] == exam_id2] if not routines_all.empty else routines_all
+
+            if mode.startswith("👤"):
+                student_label2 = st.selectbox(
+                    "Student", (cs2["StudentName"] + " — Roll " + cs2["Roll"] + " (" + cs2["StudentID"] + ")").tolist(), key="ac_student"
+                ) if not cs2.empty else None
+                if student_label2:
+                    sid2 = student_label2.split("(")[-1].rstrip(")")
+                    srow2 = cs2[cs2["StudentID"] == sid2].iloc[0]
+                    html2 = render_admit_card(school_row, srow2, exam_name2, routines_all)
+                    st.markdown(html2, unsafe_allow_html=True)
+                    print_button()
+            else:
+                sections2 = sorted(cs2["Section"].dropna().unique().tolist())
+                section2 = st.selectbox("Section", sections2 if sections2 else ["A"], key="ac_bulk_section")
+                bulk_students = cs2[cs2["Section"] == section2].sort_values(
+                    "Roll", key=lambda s: pd.to_numeric(s, errors="coerce")
+                )
+                if bulk_students.empty:
+                    st.info("এই ক্লাস/শাখায় কোনো ছাত্র নেই।")
+                elif st.button("🖨️ Generate All Admit Cards (২ জন/পাতা)", type="primary"):
+                    cards = [
+                        render_admit_card(school_row, srow, exam_name2, routines_all)
+                        for _, srow in bulk_students.iterrows()
+                    ]
+                    st.success(f"{len(cards)} জনের Admit Card তৈরি হয়েছে — মোট {(len(cards) + 1)//2} পাতা (২ জন/পাতা)।")
+                    st.markdown(render_admit_cards_2up(school_row, cards), unsafe_allow_html=True)
+                    print_button()
 
 
 def page_teachers():
@@ -1776,18 +1976,29 @@ def page_routines():
 
     if role in (ROLE_ADMIN, "Headmaster", "Headteacher") and not exams.empty:
         with st.expander("➕ Add Routine Entry"):
+            hint("প্রতিটি (তারিখ + সময় + ক্লাস-গ্রুপ) কম্বিনেশনের জন্য একটা করে এন্ট্রি যোগ করুন। "
+                 "'Class Group' ঘরে কলামের হেডিং লিখুন (যেমন: '৯ম ও ১০ম'), আর 'Subject/বিষয়' ঘরে ঠিক যা "
+                 "প্রিন্টে সেই ঘরে দেখতে চান তা লিখুন (যেমন: 'ইংরেজি-১ম')। একই তারিখ+সময়ে সব ক্লাস-গ্রুপের "
+                 "এন্ট্রি যোগ করলে ছবির মতো একটা সম্পূর্ণ রুটিন গ্রিড তৈরি হবে।")
             with st.form("add_routine"):
                 c1, c2 = st.columns(2)
                 exam_label = c1.selectbox("Exam", (exams["ExamName"] + " (" + exams["ExamID"] + ")").tolist())
                 exam_id = exam_label.split("(")[-1].rstrip(")")
-                shift = c2.text_input("Shift", value="SHIFT - 1: MORNING")
+                shift = c2.text_input("Shift (internal label)", value="SHIFT - 1: MORNING")
                 c3, c4, c5 = st.columns(3)
-                classes_txt = c3.text_input("Classes (label)")
-                class_group = c4.text_input("Class Group (comma list)")
+                classes_txt = c3.text_input("Classes (label)", help="স্বাধীন নোট — গার্ড লিস্ট/অন্য জায়গায় ব্যবহার হয়।")
+                class_group = c4.text_input(
+                    "Class Group (গ্রিডের কলাম হেডিং)", placeholder="যেমন: ৯ম ও ১০ম",
+                    help="রুটিন গ্রিড প্রিন্টে এই লেখাটাই কলাম হেডিং হিসেবে যাবে।",
+                )
                 exam_date = c5.date_input("Exam Date")
-                c6, c7 = st.columns(2)
+                c6, c7, c8 = st.columns(3)
                 start_t = c6.time_input("Start Time")
                 end_t = c7.time_input("End Time")
+                subject_label = c8.text_input(
+                    "Subject / বিষয় (এই ঘরে যা লেখা থাকবে)", placeholder="যেমন: ইংরেজি-১ম",
+                    help="গ্রিডের এই তারিখ+সময়+ক্লাস-গ্রুপের ঘরে ঠিক এই লেখাটাই দেখাবে।",
+                )
                 if st.form_submit_button("Add", type="primary"):
                     rid = next_seq_id(school_id, "Routines", "RoutineID", "ROU")
                     append_row("Routines", {
@@ -1795,21 +2006,43 @@ def page_routines():
                         "Classes": classes_txt, "ClassGroup": class_group,
                         "ExamDate": exam_date.strftime("%Y-%m-%d"), "DayName": exam_date.strftime("%A"),
                         "StartTime": start_t.strftime("%H:%M"), "EndTime": end_t.strftime("%H:%M"),
+                        "SubjectID": subject_label,
                     })
                     st.success("Routine added.")
                     st.rerun()
 
     routines = read_df("Routines", school_id=school_id)
     if not routines.empty:
-        cols = [c for c in ["ExamID", "Shift", "Classes", "ExamDate", "DayName", "StartTime", "EndTime"] if c in routines.columns]
+        cols = [c for c in ["ExamID", "Shift", "Classes", "ClassGroup", "ExamDate", "DayName",
+                             "StartTime", "EndTime", "SubjectID"] if c in routines.columns]
         st.dataframe(routines[cols], use_container_width=True, hide_index=True)
+
+        st.markdown("#### 🖨️ Print Routine — Board Format (A4, ২ কপি এক পাতায়)")
+        exam_label2 = st.selectbox(
+            "Exam", (exams["ExamName"] + " (" + exams["ExamID"] + ")").tolist(), key="routine_print_exam"
+        ) if not exams.empty else None
+        if exam_label2:
+            exam_id2 = exam_label2.split("(")[-1].rstrip(")")
+            exam_row2 = exams[exams["ExamID"] == exam_id2].iloc[0]
+            scoped = routines[routines["ExamID"] == exam_id2]
+            title = st.text_input(
+                "Print Title", value=f"{exam_row2.get('ExamName','')} পরীক্ষার রুটিন - {exam_row2.get('Session','')} ইং",
+            )
+            schools = read_df("Schools")
+            school_row = schools[schools["SchoolID"] == school_id].iloc[0] if not schools.empty else pd.Series()
+            single = render_routine_grid(school_row, title, "", scoped)
+            st.markdown(render_two_copies_stacked(single), unsafe_allow_html=True)
+            print_button()
     else:
         st.info("No routines added yet.")
 
 
 def page_superadmin():
-    hero("🛡️ SuperAdmin Console", "Schools, subscriptions & payment tracking (bKash / Nagad).")
-    tab1, tab2, tab3, tab4 = st.tabs(["🏫 Schools", "👑 School Admins", "💳 Subscriptions", "🧾 Payment Logs"])
+    hero("🛡️ SuperAdmin Console", "Schools, subscriptions, payment approval, support chat & role preview.")
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["🏫 Schools", "👑 School Admins", "💳 Subscriptions", "🧾 Payment Approval",
+         "💬 Support Chat", "🎭 Role Preview"]
+    )
 
     with tab1:
         schools = read_df("Schools")
@@ -1910,24 +2143,85 @@ def page_superadmin():
                     st.rerun()
 
     with tab4:
+        hint("নিচে যেসব পেমেন্ট 'Pending' অবস্থায় আছে সেগুলো স্কুল নিজেরাই Billing পেজ থেকে জমা দিয়েছে "
+             "(bKash/Nagad TrxID সহ)। TrxID যাচাই করে 'Approve' চাপলেই সেই স্কুলের সাবস্ক্রিপশন অটো নবায়ন "
+             "হয়ে যাবে এবং লক খুলে যাবে।")
         pays = read_df("PaymentLogs")
+        schools_lu4 = read_df("Schools").set_index("SchoolID")["SchoolName"].to_dict()
+        pending = pays[pays.get("Status", "") == "Pending"] if not pays.empty else pd.DataFrame()
+        if not pending.empty:
+            st.markdown("#### ⏳ Pending Approval")
+            for _, p in pending.iterrows():
+                with st.container(border=True) if hasattr(st, "container") else st.container():
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(
+                        f"**{schools_lu4.get(p.get('SchoolID',''), p.get('SchoolID',''))}** — "
+                        f"{p.get('Gateway','')} · TrxID: `{p.get('TrxID','')}` · ৳{p.get('Amount','')} · {p.get('PaymentDate','')}"
+                    )
+                    if c2.button("✅ Approve", key=f"approve_{p.get('PaymentID')}", type="primary"):
+                        new_exp = approve_payment(p)
+                        st.success(f"অনুমোদিত! নতুন মেয়াদ: {new_exp}")
+                        st.rerun()
+        else:
+            st.caption("এখন কোনো Pending পেমেন্ট নেই।")
+
+        st.markdown("#### 🧾 সম্পূর্ণ পেমেন্ট হিস্ট্রি")
         st.dataframe(pays, use_container_width=True, hide_index=True)
-        with st.expander("➕ Log a Payment (bKash / Nagad)"):
+        with st.expander("➕ ম্যানুয়ালি একটা পেমেন্ট সরাসরি লগ করুন (যেমন: হাতে-হাতে ক্যাশ)"):
             with st.form("add_pay"):
                 schools = read_df("Schools")
                 sch_label = st.selectbox("School", (schools["SchoolName"] + " (" + schools["SchoolID"] + ")").tolist(), key="pay_school") if not schools.empty else None
-                gateway = st.selectbox("Gateway", ["bKash", "Nagad", "Bank", "Cash"])
+                gateway = st.selectbox("Gateway", ["bKash", "Nagad", "Rocket", "Bank", "Cash"])
                 trx = st.text_input("Transaction ID")
                 amount = st.number_input("Amount (৳) ", min_value=0)
-                if st.form_submit_button("Log Payment", type="primary") and sch_label:
+                if st.form_submit_button("Log &amp; Approve Payment", type="primary") and sch_label:
                     sid = sch_label.split("(")[-1].rstrip(")")
-                    payid = f"{sid.replace('SCH-','')}-{datetime.now().strftime('%y')}-PAY{len(pays)+1:03d}"
-                    append_row("PaymentLogs", {
+                    payid = f"{sid.replace('SCH-','')}-{datetime.now().strftime('%y%m%d%H%M%S')}"
+                    row = {
                         "SchoolID": sid, "PaymentID": payid, "TrxID": trx, "Gateway": gateway,
-                        "Amount": amount, "PaymentDate": datetime.now().strftime("%Y-%m-%d"), "Status": "SUCCESS",
-                    })
-                    st.success("Payment logged.")
+                        "Amount": amount, "PaymentDate": datetime.now().strftime("%Y-%m-%d"), "Status": "Pending",
+                    }
+                    append_row("PaymentLogs", row)
+                    new_exp = approve_payment(pd.Series(row))
+                    st.success(f"পেমেন্ট লগ ও অনুমোদিত। নতুন মেয়াদ: {new_exp}")
                     st.rerun()
+
+    with tab5:
+        hint("এখান থেকে যেকোনো স্কুলের Admin-এর সাথে সরাসরি চ্যাট করতে পারবেন — সাপোর্ট বা নোটিফিকেশনের জন্য।")
+        schools5 = read_df("Schools")
+        if schools5.empty:
+            st.info("কোনো স্কুল নেই।")
+        else:
+            pick5 = st.selectbox("School", (schools5["SchoolName"] + " (" + schools5["SchoolID"] + ")").tolist(), key="chat_school_pick")
+            sid5 = pick5.split("(")[-1].rstrip(")")
+            sname5 = pick5.split("  (")[0]
+            render_chat_thread(sid5, sname5, sender_default="SuperAdmin", sender_role_default=ROLE_SUPERADMIN)
+
+    with tab6:
+        hint("এটা শুধু টেস্টিং/ডেমোর জন্য — একটা স্কুল ও রোল বেছে সেই ভূমিকায় অ্যাপটা কেমন দেখাবে তা "
+             "প্রিভিউ করতে পারবেন। আসল লগইন পরিবর্তন হয় না — 'Exit Preview' চাপলেই আবার SuperAdmin-এ ফিরে আসবেন।")
+        schools6 = read_df("Schools")
+        if schools6.empty:
+            st.info("কোনো স্কুল নেই।")
+        else:
+            c1, c2 = st.columns(2)
+            pick6 = c1.selectbox("Preview School", (schools6["SchoolName"] + " (" + schools6["SchoolID"] + ")").tolist(), key="preview_school_pick")
+            preview_role = c2.selectbox("Preview Role", [ROLE_ADMIN, ROLE_TEACHER, ROLE_CLERK, ROLE_STAFF],
+                                         format_func=lambda r: r if r else "(No Role — Staff)")
+            if st.button("🎭 Start Preview", type="primary"):
+                sid6 = pick6.split("(")[-1].rstrip(")")
+                sname6 = pick6.split("  (")[0]
+                st.session_state["real_role"] = st.session_state["role"]
+                st.session_state["real_school_id"] = st.session_state["school_id"]
+                st.session_state["real_school_name"] = st.session_state["school_name"]
+                st.session_state["real_user_name"] = st.session_state["user_name"]
+                st.session_state["impersonating"] = True
+                st.session_state["role"] = preview_role
+                st.session_state["school_id"] = sid6
+                st.session_state["school_name"] = sname6
+                st.session_state["user_name"] = f"(Preview) {preview_role or 'Staff'}"
+                st.session_state["nav"] = "dashboard"
+                st.rerun()
 
 
 # =============================================================================
@@ -1980,9 +2274,120 @@ def page_my_profile():
 # EXAM GUARD LIST / INVIGILATION DUTIES
 #   এক হলে একাধিক টিচার, একেক হলে একেকদিন, নির্দিষ্ট টিচার নির্দিষ্ট ক্লাসে না
 # =============================================================================
+# =============================================================================
+# SUBSCRIPTION & BILLING — School Admin side (renewal + bKash/Nagad claim)
+# =============================================================================
+def page_billing():
+    school_id = st.session_state["school_id"]
+    hero("💳 Subscription & Billing", "আপনার স্কুলের সাবস্ক্রিপশন স্ট্যাটাস ও পেমেন্ট।")
+    locked, sub, msg = get_subscription_status(school_id)
+    if locked:
+        st.error(f"🔒 {msg} নবায়ন না করা পর্যন্ত অন্যান্য সব ফিচার লক থাকবে।")
+    else:
+        st.success(f"✅ {msg}")
+    if sub is not None:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Plan", str(sub.get("PlanType", "")))
+        c2.metric("Amount", f"৳{sub.get('Amount','')}")
+        c3.metric("Expiry", str(sub.get("ExpiryDate", "")))
+
+    st.markdown("#### 💰 নবায়ন করতে পেমেন্ট পাঠান")
+    bkash = st.secrets.get("BKASH_NUMBER", "সেট করা হয়নি — secrets.toml-এ BKASH_NUMBER দিন")
+    nagad = st.secrets.get("NAGAD_NUMBER", "সেট করা হয়নি — secrets.toml-এ NAGAD_NUMBER দিন")
+    st.info(f"📱 **bKash** (Send Money): **{bkash}**  \n📱 **Nagad** (Send Money): **{nagad}**")
+    hint("উপরের নম্বরে টাকা পাঠিয়ে নিচে Transaction ID (TrxID)-সহ ফর্মটি জমা দিন। SuperAdmin যাচাই করে "
+         "অনুমোদন করলেই আপনার সাবস্ক্রিপশন সাথে সাথে সচল হয়ে যাবে — এখানে টাকা কাটার কিছু নেই, শুধু "
+         "প্রমাণ জমা দেওয়ার ফর্ম।")
+    with st.form("submit_payment_claim"):
+        c1, c2 = st.columns(2)
+        gateway = c1.selectbox("Payment Method", ["bKash", "Nagad", "Rocket", "Bank Transfer"])
+        amount = c2.number_input("Amount Sent (৳)", min_value=0)
+        trx = st.text_input("Transaction ID (TrxID)", placeholder="যেমন: 8N7A6QZK2X — SMS-এ পাবেন")
+        if st.form_submit_button("✅ Submit for Approval", type="primary"):
+            if not trx.strip():
+                st.error("Transaction ID দিন।")
+            else:
+                payid = f"{school_id.replace('SCH-','')}-{datetime.now().strftime('%y%m%d%H%M%S')}"
+                append_row("PaymentLogs", {
+                    "SchoolID": school_id, "PaymentID": payid,
+                    "SubscriptionID": sub.get("SubscriptionID", "") if sub is not None else "",
+                    "TrxID": trx.strip(), "Gateway": gateway, "Amount": amount,
+                    "PaymentDate": datetime.now().strftime("%Y-%m-%d"), "Status": "Pending",
+                })
+                st.success("জমা হয়েছে — SuperAdmin অনুমোদন করলে সাবস্ক্রিপশন সচল হয়ে যাবে। নিচে স্ট্যাটাস দেখতে পাবেন।")
+                st.rerun()
+
+    st.markdown("#### 🧾 আমার পেমেন্ট হিস্ট্রি")
+    pays = read_df("PaymentLogs", school_id=school_id)
+    if not pays.empty:
+        st.dataframe(pays.sort_values("PaymentDate", ascending=False), use_container_width=True, hide_index=True)
+    else:
+        st.caption("এখনো কোনো পেমেন্ট জমা দেওয়া হয়নি।")
+
+
+# =============================================================================
+# SUPPORT CHAT — School Admin <-> SuperAdmin in-app messaging
+# =============================================================================
+def page_support_chat():
+    school_id = st.session_state["school_id"]
+    school_name = st.session_state.get("school_name", school_id)
+    hero("💬 Support Chat", "SuperAdmin-এর সাথে সরাসরি মেসেজ আদান-প্রদান করুন।")
+    render_chat_thread(school_id, school_name, sender_default=st.session_state.get("user_name", "Admin"),
+                        sender_role_default=st.session_state.get("role", ROLE_ADMIN))
+
+
+def render_chat_thread(school_id: str, school_name: str, sender_default: str, sender_role_default: str):
+    msgs = read_df("SupportMessages", school_id=school_id)
+    try:
+        box = st.container(height=360, border=True)
+    except TypeError:
+        box = st.container()
+    with box:
+        if msgs.empty:
+            st.caption("এখনো কোনো মেসেজ নেই — নিচে থেকে প্রথম মেসেজ পাঠান।")
+        else:
+            for _, m in msgs.sort_values("Timestamp").iterrows():
+                who = "🛡️ SuperAdmin" if m.get("SenderRole") == ROLE_SUPERADMIN else f"🏫 {m.get('Sender','')}"
+                align = "right" if m.get("SenderRole") == ROLE_SUPERADMIN else "left"
+                bg = "#dbeafe" if m.get("SenderRole") == ROLE_SUPERADMIN else "#f1f5f9"
+                st.markdown(
+                    f"<div style='text-align:{align};margin:6px 0;'>"
+                    f"<span style='background:{bg};padding:6px 12px;border-radius:10px;display:inline-block;"
+                    f"max-width:80%;color:#0f172a;'><b>{who}</b><br/>{m.get('Message','')}"
+                    f"<br/><span style='font-size:0.7rem;color:#64748b;'>{m.get('Timestamp','')}</span></span></div>",
+                    unsafe_allow_html=True,
+                )
+    with st.form(f"send_msg_{school_id}", clear_on_submit=True):
+        text = st.text_area("মেসেজ লিখুন", height=70, placeholder="এখানে লিখুন...")
+        if st.form_submit_button("📤 Send", type="primary") and text.strip():
+            append_row("SupportMessages", {
+                "SchoolID": school_id, "MessageID": f"MSG-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+                "Sender": sender_default, "SenderRole": sender_role_default,
+                "Message": text.strip(), "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            st.rerun()
+
+
+def find_junior_proxy_teacher(teachers_df: pd.DataFrame, exclude_ids: set):
+    """Auto-Proxy Scheduler: when a teacher is absent/on leave, pick the most
+    JUNIOR available active teacher (latest JoiningDate = most junior) who
+    isn't already excluded (absent teacher + everyone already on duty that
+    day), so exam duty coverage never has a gap."""
+    if teachers_df.empty:
+        return None
+    pool = teachers_df[
+        (teachers_df.get("IsActive", "Yes") != "No") & (~teachers_df["TeacherID"].isin(exclude_ids))
+    ].copy()
+    if pool.empty:
+        return None
+    pool["_join"] = pd.to_datetime(pool.get("JoiningDate", ""), errors="coerce")
+    pool = pool.sort_values("_join", ascending=False, na_position="last")  # latest joining = most junior
+    return pool.iloc[0]
+
+
 def page_exam_duties():
     school_id, role, actor = st.session_state["school_id"], st.session_state["role"], st.session_state["user_name"]
-    hero("🛡️ Guard List / Exam Duties", "Assign invigilators per room per exam-day. Private-tutor conflicts are flagged automatically.")
+    hero("🛡️ Guard List / Exam Duties", "Assign invigilators per room per exam-day — prints in the official Invigilation Duty & Script Distribution Chart format.")
 
     exams = read_df("Exams", school_id=school_id)
     routines = read_df("Routines", school_id=school_id)
@@ -1998,20 +2403,39 @@ def page_exam_duties():
     day_routines = routines[routines["ExamID"] == exam_id] if not routines.empty else pd.DataFrame()
     day_options = sorted(day_routines["ExamDate"].dropna().unique().tolist()) if not day_routines.empty else []
 
+    hint("প্রতিটি রুমের জন্য একটি করে Duty সেভ করুন — Shift ঠিক ছবির মতো লিখুন, যেমন: "
+         "'SHIFT - 1: MORNING (09:00 AM - 11:30 AM) | Classes: Play to 5th'। একই Shift-এর সব রুম "
+         "প্রিন্টে একসাথে একটা টেবিলে দেখাবে।")
+
     if role in ADMIN_LIKE_ROLES:
         with st.expander("➕ Assign / Update a Room's Duty", expanded=True):
             with st.form("add_duty"):
                 c1, c2 = st.columns(2)
-                exam_date = c1.selectbox("Exam Date (from Routine)", day_options) if day_options else c1.text_input("Exam Date (YYYY-MM-DD)")
-                room_no = c2.text_input("Room No.")
-                assigned_classes = st.text_input("Assigned Class(es) for this room")
+                exam_date = c1.selectbox("Exam Date (from Routine)", day_options) if day_options else c1.text_input(
+                    "Exam Date (YYYY-MM-DD)", placeholder="18/09/2026")
+                room_no = c2.text_input("Room No.", placeholder="যেমন: Room - 101")
+                shift = st.text_input(
+                    "Shift (ঠিক এভাবে লিখুন — প্রিন্টে এই লেখাটাই শিরোনাম হিসেবে যাবে)",
+                    placeholder="SHIFT - 1: MORNING (09:00 AM - 11:30 AM) | Classes: Play to 5th",
+                    help="একই Shift টেক্সট যেসব রুমে বসাবেন, প্রিন্টের সময় তারা একসাথে একই ব্লকে দেখাবে।",
+                )
+                assigned_classes = st.text_area(
+                    "Assigned Classes & Students",
+                    placeholder="Class 1(D), Class 2(D)\n40 Students",
+                    help="এই রুমে কোন কোন ক্লাসের ছাত্র বসবে ও মোট কতজন — একাধিক লাইনে লিখতে পারেন, প্রিন্টে যেমন লিখবেন তেমনই দেখাবে।",
+                    height=70,
+                )
+                total_scripts = st.number_input(
+                    "Total Scripts Needed", min_value=0, step=1,
+                    help="এই রুমে মোট কতজন পরীক্ষা দেবে — সাধারণত Assigned Students-এর সমান।",
+                )
                 teacher_names = (teachers["Name"] + " (" + teachers["TeacherID"] + ")").tolist()
                 invigilators = st.multiselect("Invigilator(s) — one room can have more than one", teacher_names)
                 excluded = st.multiselect(
                     "Teachers who must NOT be assigned here (their own private students sit in this room)",
                     teacher_names,
                 )
-                notes = st.text_input("Notes")
+                notes = st.text_input("Notes (optional)")
                 if st.form_submit_button("Save Duty", type="primary"):
                     inv_ids = [t.split("(")[-1].rstrip(")") for t in invigilators][:3]
                     excl_ids = [t.split("(")[-1].rstrip(")") for t in excluded]
@@ -2038,8 +2462,8 @@ def page_exam_duties():
                         did = next_seq_id(school_id, "ExamDuties", "DutyID", "DUTY")
                         row = {
                             "SchoolID": school_id, "DutyID": did, "ExamID": exam_id, "ExamDate": exam_date,
-                            "Shift": "", "RoomNo": room_no, "AssignedClasses": assigned_classes,
-                            "TotalScriptsNeeded": "", "Invigilator1_ID": inv_ids[0] if len(inv_ids) > 0 else "",
+                            "Shift": shift, "RoomNo": room_no, "AssignedClasses": assigned_classes,
+                            "TotalScriptsNeeded": total_scripts, "Invigilator1_ID": inv_ids[0] if len(inv_ids) > 0 else "",
                             "Invigilator2_ID": inv_ids[1] if len(inv_ids) > 1 else "",
                             "Invigilator3_ID": inv_ids[2] if len(inv_ids) > 2 else "",
                             "PrivateTutorTeacherIDs": ",".join(excl_ids), "Status": "Assigned", "Notes": notes,
@@ -2051,14 +2475,55 @@ def page_exam_duties():
     duties = read_df("ExamDuties", school_id=school_id)
     duties = duties[duties["ExamID"] == exam_id] if not duties.empty else duties
     if duties is not None and not duties.empty:
-        show = duties.copy()
+        print_date_options = sorted(duties["ExamDate"].dropna().unique().tolist())
+        print_date = st.selectbox("🖨️ Print chart for date", print_date_options, key="guardlist_print_date")
+        day_duties = duties[duties["ExamDate"] == print_date]
+
+        if role in ADMIN_LIKE_ROLES:
+            with st.expander("🔄 Auto-Proxy Scheduler — অনুপস্থিত/ছুটিতে থাকা শিক্ষকের বদলে অটো-এসাইন"):
+                hint("যে শিক্ষক আজ ডিউটিতে অনুপস্থিত/ছুটিতে আছেন তাকে বেছে নিন — অ্যাপ স্বয়ংক্রিয়ভাবে "
+                     "সবচেয়ে জুনিয়র (সর্বশেষ যোগদানকারী), সেদিন অন্য কোথাও ডিউটিতে নেই এমন সক্রিয় "
+                     "শিক্ষককে সেই ডিউটিতে বসিয়ে দেবে — কভারেজে কোনো ফাঁক থাকবে না।")
+                inv_map = []
+                for _, d in day_duties.iterrows():
+                    for col in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"]:
+                        tid = d.get(col, "")
+                        if tid:
+                            inv_map.append((d.get("DutyID"), col, tid, d.get("RoomNo", "")))
+                if not inv_map:
+                    st.caption("এই দিনে কোনো ইনভিজিলেটর এসাইন করা নেই।")
+                else:
+                    labels = [f"{teacher_lookup.get(tid, tid)} — Room {room}" for _, _, tid, room in inv_map]
+                    pick_idx = st.selectbox("আজ কে অনুপস্থিত/ছুটিতে?", range(len(labels)), format_func=lambda i: labels[i])
+                    if st.button("🔄 Auto-Assign Junior Proxy", type="primary"):
+                        did, col, absent_tid, _ = inv_map[pick_idx]
+                        already_on_duty_today = {t for _, _, t, _ in inv_map}
+                        proxy = find_junior_proxy_teacher(teachers, already_on_duty_today)
+                        if proxy is None:
+                            st.error("কোনো খালি (আজ অন্য কোথাও ডিউটিতে নেই এমন) সক্রিয় শিক্ষক পাওয়া যায়নি।")
+                        else:
+                            duties_all = read_df("ExamDuties", school_id=school_id)
+                            mask = duties_all["DutyID"] == did
+                            duties_all.loc[mask, col] = proxy["TeacherID"]
+                            note_add = (f" | Auto-proxy {datetime.now().strftime('%Y-%m-%d %H:%M')}: "
+                                        f"{teacher_lookup.get(absent_tid, absent_tid)} অনুপস্থিত → "
+                                        f"{proxy.get('Name','')} (Joining: {proxy.get('JoiningDate','')}) প্রতিস্থাপিত")
+                            duties_all.loc[mask, "Notes"] = duties_all.loc[mask, "Notes"].astype(str) + note_add
+                            upsert_rows("ExamDuties", duties_all[mask], key_cols=["DutyID"])
+                            st.success(f"✅ {teacher_lookup.get(absent_tid, absent_tid)}-এর বদলে "
+                                       f"{proxy.get('Name','')} (সবচেয়ে জুনিয়র, খালি) অটো-এসাইন করা হলো।")
+                            st.rerun()
+
+        show = day_duties.copy()
         for c in ["Invigilator1_ID", "Invigilator2_ID", "Invigilator3_ID"]:
             show[c] = show[c].map(lambda t: teacher_lookup.get(t, t))
-        cols = [c for c in ["RoomNo", "AssignedClasses", "ExamDate", "Invigilator1_ID",
+        cols = [c for c in ["Shift", "RoomNo", "AssignedClasses", "TotalScriptsNeeded", "Invigilator1_ID",
                              "Invigilator2_ID", "Invigilator3_ID", "PrivateTutorTeacherIDs", "Status"] if c in show.columns]
         st.dataframe(show[cols], use_container_width=True, hide_index=True)
+
         html = render_guard_list(
-            read_df("Schools")[read_df("Schools")["SchoolID"] == school_id].iloc[0], exam_name, duties, teacher_lookup
+            read_df("Schools")[read_df("Schools")["SchoolID"] == school_id].iloc[0],
+            print_date, f"Exam: {exam_name}", day_duties, teacher_lookup,
         )
         st.markdown(html, unsafe_allow_html=True)
         print_button()
@@ -2325,7 +2790,8 @@ NAV_BY_ROLE = {
         ("🎒 Students", "students"), ("👩‍🏫 Teachers", "teachers"),
         ("🗓️ Routines", "routines"), ("🛡️ Guard List / Duties", "duties"),
         ("🪑 Seat Plan", "seatplan"), ("📒 Script Register", "scripts"),
-        ("📢 Notices", "notices"), ("🗂️ Other Records", "other"), ("👤 My Profile", "profile"),
+        ("📢 Notices", "notices"), ("🗂️ Other Records", "other"),
+        ("💳 Subscription & Billing", "billing"), ("💬 Support Chat", "chat"), ("👤 My Profile", "profile"),
     ],
     ROLE_TEACHER: [
         ("🏠 Dashboard", "dashboard"), ("📝 Marks Entry", "marks"),
@@ -2342,6 +2808,9 @@ NAV_BY_ROLE = {
 # Headteacher/Headmaster get the same menu as Admin
 NAV_BY_ROLE["Headmaster"] = NAV_BY_ROLE[ROLE_ADMIN]
 NAV_BY_ROLE["Headteacher"] = NAV_BY_ROLE[ROLE_ADMIN]
+# The ONLY menu a school is allowed to see once its subscription has expired —
+# everything else is locked until a SuperAdmin approves a renewal payment.
+NAV_WHEN_LOCKED = [("💳 Subscription & Billing", "billing"), ("💬 Support Chat", "chat"), ("👤 My Profile", "profile")]
 
 PAGE_FUNCS = {
     "dashboard": page_dashboard, "marks": page_marks_entry, "results": page_generate_results,
@@ -2350,6 +2819,7 @@ PAGE_FUNCS = {
     "other": page_other_records, "superadmin": page_superadmin,
     "duties": page_exam_duties, "seatplan": page_seatplan, "scripts": page_script_distribution,
     "certificates": page_certificates, "profile": page_my_profile,
+    "billing": page_billing, "chat": page_support_chat,
 }
 
 
@@ -2359,8 +2829,25 @@ def sidebar_nav():
         st.markdown(f"### 🎓 School Manager BD")
         st.caption(f"{st.session_state['school_name']}")
         st.markdown(f"**{st.session_state['user_name']}**  \n`{role or 'Staff'}`")
+
+        if st.session_state.get("impersonating"):
+            st.warning("🎭 **Preview Mode চালু আছে** — এটা শুধু টেস্টিং, আসল ডাটা এডিট করবেন না।")
+            if st.button("↩️ Exit Preview — Back to SuperAdmin", use_container_width=True, type="primary"):
+                st.session_state["role"] = st.session_state.pop("real_role")
+                st.session_state["school_id"] = st.session_state.pop("real_school_id")
+                st.session_state["school_name"] = st.session_state.pop("real_school_name")
+                st.session_state["user_name"] = st.session_state.pop("real_user_name")
+                st.session_state["impersonating"] = False
+                st.session_state["nav"] = "superadmin"
+                st.rerun()
+
         st.markdown("---")
-        items = NAV_BY_ROLE.get(role, NAV_BY_ROLE[ROLE_STAFF])
+        locked = False
+        if role != ROLE_SUPERADMIN and not st.session_state.get("impersonating"):
+            locked, _, _ = get_subscription_status(st.session_state["school_id"])
+        items = NAV_WHEN_LOCKED if locked else NAV_BY_ROLE.get(role, NAV_BY_ROLE[ROLE_STAFF])
+        if locked and st.session_state.get("nav") not in [k for _, k in NAV_WHEN_LOCKED]:
+            st.session_state["nav"] = "billing"
         if "nav" not in st.session_state:
             st.session_state["nav"] = items[0][1]
         for label, key in items:
